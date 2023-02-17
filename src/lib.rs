@@ -191,7 +191,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 
         Ok(TextLayout {
             string: self.string,
-            buffer: inner, 
+            buffer: inner,
         })
     }
 }
