@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ab_glyph = "0.2.20"
-cosmic-text = { version = "0.7.0", default-features = false, features = ["std"] }
+cosmic-text = { version = "0.7.0", default-features = false }
 ouroboros = "0.15.6"
 piet = { version = "0.6.2", default-features = false }
 ttf-parser = "0.18.1"
