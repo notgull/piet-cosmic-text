@@ -1,24 +1,97 @@
 //! An implementation of [`piet`]'s text API using [`cosmic-text`].
 //!
+//! This library implements [`piet`]'s [`Text`] API using primitives from [`cosmic-text`].
+//! The intention is for this library to act as a stepping stone to be able to use drawing
+//! frameworks that do not natively support text rendering (like OpenGL) by using the
+//! [`cosmic-text`] library to render text to a texture, and then using that texture
+//! in the drawing framework.
+//!
+//! This library provides a [`Text`](crate::Text), a [`TextLayoutBuilder`] and a
+//! [`TextLayout`]. All of these are intended to be used in the same way as the
+//! corresponding types in [`piet`]. However, [`TextLayout`] has a `buffer` method that
+//! can be used to get the underlying text.
+//!
+//! # Limitations
+//!
+//! - New fonts cannot be loaded while a [`TextLayout`] is alive.
+//! - The text does not support [`TextAlignment`] or variable font sizes. Attempting to
+//!   use these will result in an error.
+//!
 //! [`piet`]: https://docs.rs/piet
 //! [`cosmic-text`]: https://docs.rs/cosmic-text
+//! [`TextAlignment`]: https://docs.rs/piet/latest/piet/enum.TextAlignment.html
 
+#![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
 use cosmic_text::fontdb::{Database, Family};
 use cosmic_text::{
-    Buffer, BufferLine, CacheKey as GlyphKey, Font, FontSystem, LayoutGlyph, LayoutRunIter, Metrics,
+    Attrs, AttrsList, AttrsOwned, Buffer, BufferLine, CacheKey as GlyphKey, Font, FontSystem,
+    LayoutGlyph, LayoutRunIter, Metrics,
 };
 
-use piet::{Color, Error, FontFamily, TextAlignment, TextAttribute};
+use piet::kurbo::{Size, self};
+use piet::{util, LineMetric};
+use piet::{Color, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
 
 use std::cell::{Cell, Ref, RefCell};
-use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::cmp;
 use std::fmt;
 use std::mem;
 use std::ops::{Bound, Range, RangeBounds};
 use std::rc::Rc;
+
+/// The metadata stored in the font's stylings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Metadata(usize);
+
+const UNDERLINE: usize = 1 << 0;
+const STRIKETHROUGH: usize = 1 << 1;
+
+impl Metadata {
+    /// Create a new, empty metadata.
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    /// Create a metadata from the raw value.
+    pub fn from_raw(raw: usize) -> Self {
+        Self(raw)
+    }
+
+    /// Convert into the raw value.
+    pub fn into_raw(self) -> usize {
+        self.0
+    }
+
+    /// Set the "underline" bit.
+    pub fn set_underline(&mut self, underline: bool) {
+        if underline {
+            self.0 |= UNDERLINE;
+        } else {
+            self.0 &= !UNDERLINE;
+        }
+    }
+
+    /// Set the "strikethrough" bit.
+    pub fn set_strikethrough(&mut self, strikethrough: bool) {
+        if strikethrough {
+            self.0 |= STRIKETHROUGH;
+        } else {
+            self.0 &= !STRIKETHROUGH;
+        }
+    }
+
+    /// Is the "underline" bit set?
+    pub fn underline(&self) -> bool {
+        self.0 & UNDERLINE != 0
+    }
+
+    /// Is the "strikethrough" bit set?
+    pub fn strikethrough(&self) -> bool {
+        self.0 & STRIKETHROUGH != 0
+    }
+}
 
 /// The text implementation entry point.
 ///
@@ -27,9 +100,16 @@ use std::rc::Rc;
 /// `load_from_data` should not be called while `TextLayout` objects are alive; otherwise, a panic will
 /// occur.
 #[derive(Clone)]
-pub struct Text {
+pub struct Text(Rc<Inner>);
+
+struct Inner {
     /// Font database.
-    font_db: Rc<RefCell<FontDatabase>>,
+    font_db: RefCell<FontDatabase>,
+
+    /// Buffer that holds lines of text.
+    ///
+    /// These are held here so that they aren't constantly reallocated.
+    buffer: Cell<Vec<BufferLine>>,
 }
 
 impl fmt::Debug for Text {
@@ -46,9 +126,10 @@ impl Text {
 
     /// Create a new `Text` renderer from a `FontSystem`.
     pub fn from_font_system(font_system: FontSystem) -> Self {
-        Self {
-            font_db: Rc::new(RefCell::new(FontDatabase::Cosmic(font_system))),
-        }
+        Self(Rc::new(Inner {
+            font_db: RefCell::new(FontDatabase::Cosmic(font_system)),
+            buffer: Cell::new(Vec::new()),
+        }))
     }
 }
 
@@ -63,14 +144,16 @@ impl piet::Text for Text {
     type TextLayoutBuilder = TextLayoutBuilder;
 
     fn font_family(&mut self, family_name: &str) -> Option<FontFamily> {
-        self.font_db
+        self.0
+            .font_db
             .try_borrow()
             .ok()
             .and_then(|font_db| font_db.font_family_by_name(family_name))
     }
 
     fn load_font(&mut self, data: &[u8]) -> Result<FontFamily, Error> {
-        self.font_db
+        self.0
+            .font_db
             .try_borrow_mut()
             .map_err(|_| {
                 Error::BackendError(
@@ -80,50 +163,58 @@ impl piet::Text for Text {
             .and_then(|mut font_db| font_db.load_font(data))
     }
 
-    fn new_text_layout(&mut self, text: impl piet::TextStorage) -> Self::TextLayoutBuilder {
-        let text = {
-            let str = text.as_str().to_string();
-            Rc::from(str)
-        };
+    fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
+        // Force the font database to enter FontSystem mode.
+        self.0
+            .font_db
+            .try_borrow_mut()
+            .expect("font database is borrowed")
+            .font_system();
+
+        let text = Rc::new(text);
 
         TextLayoutBuilder {
             handle: self.clone(),
             string: text,
-            default_attributes: vec![],
-            range_attributes: HashMap::new(),
-            alignment: TextAlignment::Start,
+            defaults: util::LayoutDefaults::default(),
+            range_attributes: vec![],
+            last_range_start_pos: 0,
             max_width: f64::INFINITY,
+            error: None,
         }
     }
 }
 
 /// The text layout builder used by the [`RenderContext`].
-#[derive(Debug, Clone)]
 pub struct TextLayoutBuilder {
     /// Handle to the original `Text` object.
     handle: Text,
 
     /// The string we're laying out.
-    string: Rc<str>,
+    string: Rc<dyn TextStorage>,
 
     /// The default text attributes.
-    default_attributes: Vec<TextAttribute>,
+    defaults: util::LayoutDefaults,
+
+    /// The width constraint.
+    max_width: f64,
 
     /// The range attributes.
-    range_attributes: HashMap<Range<usize>, Vec<TextAttribute>>,
+    range_attributes: Vec<(Range<usize>, TextAttribute)>,
+    last_range_start_pos: usize,
 
-    /// The alignment.
-    alignment: TextAlignment,
-
-    /// The allowed buffer size.
-    max_width: f64,
+    /// The last error that occurred.
+    error: Option<Error>,
 }
 
 impl piet::TextLayoutBuilder for TextLayoutBuilder {
     type Out = TextLayout;
 
     fn alignment(mut self, alignment: TextAlignment) -> Self {
-        self.alignment = alignment;
+        // TODO: Support alignment.
+        if !matches!(alignment, TextAlignment::Start) {
+            self.error = Some(Error::NotSupported);
+        }
         self
     }
 
@@ -133,7 +224,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
     }
 
     fn default_attribute(mut self, attribute: impl Into<TextAttribute>) -> Self {
-        self.default_attributes.push(attribute.into());
+        self.defaults.set(attribute);
         self
     }
 
@@ -142,37 +233,90 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         range: impl RangeBounds<usize>,
         attribute: impl Into<TextAttribute>,
     ) -> Self {
-        let start = match range.start_bound() {
-            Bound::Included(&n) => n,
-            Bound::Excluded(&n) => n + 1,
-            Bound::Unbounded => 0,
-        };
+        let range = util::resolve_range(range, self.string.len());
+        let attribute = attribute.into();
 
-        let end = match range.end_bound() {
-            Bound::Included(&n) => n + 1,
-            Bound::Excluded(&n) => n,
-            Bound::Unbounded => self.string.len(),
-        };
+        debug_assert!(
+            range.start >= self.last_range_start_pos,
+            "attributes must be added in non-decreasing start order"
+        );
+        self.last_range_start_pos = range.start;
 
-        let range = start..end;
-
-        let attributes = match self.range_attributes.entry(range) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(Vec::new()),
-        };
-
-        attributes.push(attribute.into());
+        self.range_attributes.push((range, attribute));
 
         self
     }
 
     fn build(self) -> Result<Self::Out, Error> {
-        let metrics = Metrics::new(todo!(), todo!());
+        let Self {
+            handle,
+            string,
+            defaults,
+            max_width,
+            range_attributes,
+            error,
+            ..
+        } = self;
+
+        // If an error occurred, return it.
+        if let Some(error) = error {
+            return Err(error);
+        }
+
+        // Get the font size and line height.
+        let font_size = points_to_pixels(defaults.font_size);
+
+        // NOTE: Pango uses a default line height of 0, and piet-cairo doesn't appear to
+        // change this.
+        let metrics = Metrics::new(font_size as _, 0);
+
+        // Get the default attributes for the layout.
+        let default_attrs = {
+            let mut metadata = Metadata::new();
+
+            if defaults.underline {
+                metadata.set_underline(true);
+            }
+
+            if defaults.strikethrough {
+                metadata.set_strikethrough(true);
+            }
+
+            let mut attrs = Attrs::new()
+                .family(cvt_family(&defaults.font))
+                .weight(cvt_weight(defaults.weight))
+                .style(cvt_style(defaults.style))
+                .metadata(metadata.into_raw());
+
+            if defaults.fg_color != util::DEFAULT_TEXT_COLOR {
+                attrs = attrs.color(cvt_color(defaults.fg_color));
+            }
+
+            attrs
+        };
+
+        // Re-use memory from a previous layout.
+        let mut buffer_lines = handle.0.buffer.take();
+        let mut offset = 0;
+
+        for line in string.lines() {
+            let start = offset;
+            let end = start + line.len() + 1;
+
+            // Get the attributes for this line.
+            let mut attrs_list = AttrsList::new(default_attrs);
+
+            // TODO: normalize everything here
+
+            buffer_lines.push(BufferLine::new(line, attrs_list));
+
+            offset = end;
+        }
 
         // Build the self-referencing structure.
-        let inner = SelfRefBufferTryBuilder::<_, _, Error> {
-            text: self.handle.clone(),
-            font_db_builder: |text| Ok(text.font_db.borrow()),
+        let inner = SelfRefBufferInnerTryBuilder::<_, _, Error> {
+            text: handle,
+            font_db_builder: |text| Ok(text.0.font_db.borrow()),
             buffer_builder: move |font_db| {
                 let font_system = match &**font_db {
                     FontDatabase::Cosmic(font_system) => font_system,
@@ -184,14 +328,22 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
                     _ => unreachable!(),
                 };
 
-                Ok(Buffer::new(font_system, metrics))
+                let mut buffer = Buffer::new(font_system, metrics);
+                buffer.lines = buffer_lines;
+                buffer.set_size(max_width as i32, i32::MAX);
+                buffer.set_wrap(cosmic_text::Wrap::Word);
+
+                // Shape the buffer.
+                buffer.shape_until_scroll();
+
+                Ok(buffer)
             },
         }
         .try_build()?;
 
         Ok(TextLayout {
-            string: self.string,
-            buffer: inner,
+            string,
+            buffer: Rc::new(SelfRefBuffer(inner)),
         })
     }
 }
@@ -200,14 +352,17 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 #[derive(Clone)]
 pub struct TextLayout {
     /// The original string.
-    string: Rc<str>,
+    string: Rc<dyn TextStorage>,
 
     /// A wrapper around a buffer but with the lifetime requirement elided.
-    buffer: SelfRefBuffer,
+    buffer: Rc<SelfRefBuffer>,
 }
 
+/// A wrapper around a self-referencing buffer that we can impl Drop on.
+struct SelfRefBuffer(SelfRefBufferInner);
+
 #[ouroboros::self_referencing]
-struct SelfRefBuffer {
+struct SelfRefBufferInner {
     /// Handle to the `Text` renderer.
     text: Text,
 
@@ -222,50 +377,52 @@ struct SelfRefBuffer {
     buffer: Buffer<'this>,
 }
 
-impl Clone for SelfRefBuffer {
-    fn clone(&self) -> Self {
-        SelfRefBufferBuilder {
-            text: self.borrow_text().clone(),
-            font_db_builder: |text| text.font_db.borrow(),
-            buffer_builder: |font_db| {
-                let this_buffer = self.borrow_buffer();
+impl Drop for SelfRefBuffer {
+    fn drop(&mut self) {
+        let text = self.0.borrow_text().clone();
+        self.0.with_buffer_mut(|buf| {
+            let mut old_cache = text.0.buffer.take();
+            let mut new_cache = mem::take(&mut buf.lines);
+            new_cache.clear();
 
-                let metrics = this_buffer.metrics();
-                let (width, height) = this_buffer.size();
+            // If the capacity of the new cache is larger than the old cache, swap them.
+            if new_cache.capacity() > old_cache.capacity() {
+                mem::swap(&mut new_cache, &mut old_cache);
+            }
 
-                let mut new_buffer = Buffer::new(
-                    match &**font_db {
-                        FontDatabase::Cosmic(font_system) => font_system,
-                        _ => unreachable!(),
-                    },
-                    metrics,
-                );
-                new_buffer.set_size(width, height);
-
-                new_buffer
-            },
-        }
-        .build()
+            text.0.buffer.set(old_cache);
+        })
     }
 }
 
 impl TextLayout {
     /// Get a reference to the inner `Buffer`.
     pub fn buffer(&self) -> &Buffer<'_> {
-        self.buffer.borrow_buffer()
+        self.buffer.0.borrow_buffer()
+    }
+
+    /// Get an iterator over the layout runs.
+    pub fn layout_runs(&self) -> LayoutRunIter<'_, '_> {
+        self.buffer().layout_runs()
+    }
+
+    /// Get an iterator over the line metrics.
+    fn line_metrics(&self) -> impl Iterator<Item = LineMetric> + '_ {
+        self.layout_runs().map(|_layout| todo!())
     }
 }
 
 impl piet::TextLayout for TextLayout {
-    fn size(&self) -> piet::kurbo::Size {
+    fn size(&self) -> Size {
         todo!()
     }
 
     fn trailing_whitespace_width(&self) -> f64 {
-        todo!()
+        // TODO: This doesn't matter I think.
+        self.size().width
     }
 
-    fn image_bounds(&self) -> piet::kurbo::Rect {
+    fn image_bounds(&self) -> kurbo::Rect {
         todo!()
     }
 
@@ -287,14 +444,14 @@ impl piet::TextLayout for TextLayout {
     }
 
     fn line_metric(&self, line_number: usize) -> Option<piet::LineMetric> {
-        todo!()
+        self.line_metrics().nth(line_number)
     }
 
     fn line_count(&self) -> usize {
         self.buffer().layout_runs().count()
     }
 
-    fn hit_test_point(&self, point: piet::kurbo::Point) -> piet::HitTestPoint {
+    fn hit_test_point(&self, point: kurbo::Point) -> piet::HitTestPoint {
         todo!()
     }
 
@@ -428,4 +585,44 @@ fn font_name(font: &[u8]) -> Result<String, Error> {
     // TODO: Support macintosh encoding.
     name.to_string()
         .ok_or_else(|| Error::BackendError("font name is not valid UTF-16".into()))
+}
+
+fn points_to_pixels(points: f64) -> f64 {
+    points * 96.0 / 72.0
+}
+
+fn cvt_color(p: piet::Color) -> cosmic_text::Color {
+    let (r, g, b, a) = p.as_rgba8();
+    cosmic_text::Color::rgba(r, g, b, a)
+}
+
+fn cvt_family(p: &piet::FontFamily) -> cosmic_text::Family<'_> {
+    macro_rules! generic {
+        ($piet:ident => $cosmic:ident) => {
+            if p == &piet::FontFamily::$piet {
+                return cosmic_text::Family::$cosmic;
+            }
+        };
+    }
+
+    if p.is_generic() {
+        generic!(SERIF => Serif);
+        generic!(SANS_SERIF => SansSerif);
+        generic!(MONOSPACE => Monospace);
+    }
+
+    cosmic_text::Family::Name(p.name())
+}
+
+fn cvt_style(p: piet::FontStyle) -> cosmic_text::Style {
+    use piet::FontStyle;
+
+    match p {
+        FontStyle::Italic => cosmic_text::Style::Italic,
+        FontStyle::Regular => cosmic_text::Style::Normal,
+    }
+}
+
+fn cvt_weight(p: piet::FontWeight) -> cosmic_text::Weight {
+    cosmic_text::Weight(p.to_raw())
 }
