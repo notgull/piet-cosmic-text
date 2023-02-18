@@ -25,22 +25,21 @@
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
 use cosmic_text::fontdb::{Database, Family};
-use cosmic_text::{
-    Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics,
-};
+use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
-use piet::kurbo::{Size, self};
+use piet::kurbo::{Point, Rect, Size};
 use piet::{util, LineMetric};
 use piet::{Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
 
 use std::cell::{Cell, Ref, RefCell};
-
 use std::fmt;
 use std::mem;
 use std::ops::{Range, RangeBounds};
 use std::rc::Rc;
 
 /// The metadata stored in the font's stylings.
+///
+/// This should be considered by the renderer in order to render extra decorations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Metadata(usize);
 
@@ -164,11 +163,9 @@ impl piet::Text for Text {
 
     fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
         // Force the font database to enter FontSystem mode.
-        self.0
-            .font_db
-            .try_borrow_mut()
-            .expect("font database is borrowed")
-            .font_system();
+        if !matches!(&*self.0.font_db.borrow(), FontDatabase::Cosmic(_)) {
+            self.0.font_db.borrow_mut().font_system();
+        }
 
         let text = Rc::new(text);
 
@@ -252,7 +249,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             string,
             defaults,
             max_width,
-            
+
             error,
             ..
         } = self;
@@ -342,6 +339,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 
         Ok(TextLayout {
             string,
+            glyph_size: font_size as i32,
             buffer: Rc::new(SelfRefBuffer(inner)),
         })
     }
@@ -352,6 +350,9 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 pub struct TextLayout {
     /// The original string.
     string: Rc<dyn TextStorage>,
+
+    /// The size of the glyph in pixels.
+    glyph_size: i32,
 
     /// A wrapper around a buffer but with the lifetime requirement elided.
     buffer: Rc<SelfRefBuffer>,
@@ -413,7 +414,27 @@ impl TextLayout {
 
 impl piet::TextLayout for TextLayout {
     fn size(&self) -> Size {
-        todo!()
+        self.layout_runs()
+            .fold(Size::new(0.0, 0.0), |mut size, run| {
+                let max_glyph_size = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.cache_key.font_size)
+                    .max()
+                    .unwrap_or(self.glyph_size);
+
+                let new_width = run.line_w as f64;
+                if new_width > size.width {
+                    size.width = new_width;
+                }
+
+                let new_height = (run.line_y + max_glyph_size) as f64;
+                if new_height > size.height {
+                    size.height = new_height;
+                }
+
+                size
+            })
     }
 
     fn trailing_whitespace_width(&self) -> f64 {
@@ -421,8 +442,9 @@ impl piet::TextLayout for TextLayout {
         self.size().width
     }
 
-    fn image_bounds(&self) -> kurbo::Rect {
-        todo!()
+    fn image_bounds(&self) -> Rect {
+        // TODO: Make this more exact.
+        Rect::from_origin_size(Point::ZERO, self.size())
     }
 
     fn text(&self) -> &str {
@@ -450,12 +472,45 @@ impl piet::TextLayout for TextLayout {
         self.buffer().layout_runs().count()
     }
 
-    fn hit_test_point(&self, _point: kurbo::Point) -> piet::HitTestPoint {
-        todo!()
+    fn hit_test_point(&self, point: Point) -> piet::HitTestPoint {
+        let mut htp = piet::HitTestPoint::default();
+        let (x, y) = point.into();
+
+        if let Some(cursor) = self.buffer().hit(x as i32, y as i32) {
+            htp.idx = cursor.index;
+            htp.is_inside = true;
+            return htp;
+        }
+
+        todo!("Calculate the closest index to the point.")
     }
 
-    fn hit_test_text_position(&self, _idx: usize) -> piet::HitTestPosition {
-        todo!()
+    fn hit_test_text_position(&self, idx: usize) -> piet::HitTestPosition {
+        // Iterator over glyphs and their assorted lines.
+        let mut lines_and_glyphs = self.layout_runs().enumerate().flat_map(|(line, run)| {
+            run.glyphs.iter().map(move |glyph| {
+                (
+                    line,
+                    {
+                        // Get the point.
+                        let x = glyph.x_int as f64;
+                        let y = run.line_y as f64 + glyph.y_int as f64 + self.glyph_size as f64;
+
+                        Point::new(x, y)
+                    },
+                    glyph.start..glyph.end,
+                )
+            })
+        });
+
+        let (line, point, _) = lines_and_glyphs
+            .find(|(_, _, range)| range.contains(&idx))
+            .expect("Index out of bounds.");
+
+        let mut htp = piet::HitTestPosition::default();
+        htp.point = point;
+        htp.line = line;
+        htp
     }
 }
 
@@ -567,6 +622,18 @@ impl FontDatabase {
                 _ => unreachable!("cannot poll an empty hole"),
             }
         }
+    }
+}
+
+/// Intersection of two ranges.
+fn intersect_ranges(a: &Range<usize>, b: &Range<usize>) -> Option<Range<usize>> {
+    let start = a.start.max(b.start);
+    let end = a.end.min(b.end);
+
+    if start < end {
+        Some(start..end)
+    } else {
+        None
     }
 }
 
