@@ -26,19 +26,18 @@
 
 use cosmic_text::fontdb::{Database, Family};
 use cosmic_text::{
-    Attrs, AttrsList, AttrsOwned, Buffer, BufferLine, CacheKey as GlyphKey, Font, FontSystem,
-    LayoutGlyph, LayoutRunIter, Metrics,
+    Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics,
 };
 
 use piet::kurbo::{Size, self};
 use piet::{util, LineMetric};
-use piet::{Color, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
+use piet::{Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
 
 use std::cell::{Cell, Ref, RefCell};
-use std::cmp;
+
 use std::fmt;
 use std::mem;
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::{Range, RangeBounds};
 use std::rc::Rc;
 
 /// The metadata stored in the font's stylings.
@@ -253,7 +252,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             string,
             defaults,
             max_width,
-            range_attributes,
+            
             error,
             ..
         } = self;
@@ -304,7 +303,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             let end = start + line.len() + 1;
 
             // Get the attributes for this line.
-            let mut attrs_list = AttrsList::new(default_attrs);
+            let attrs_list = AttrsList::new(default_attrs);
 
             // TODO: normalize everything here
 
@@ -451,11 +450,11 @@ impl piet::TextLayout for TextLayout {
         self.buffer().layout_runs().count()
     }
 
-    fn hit_test_point(&self, point: kurbo::Point) -> piet::HitTestPoint {
+    fn hit_test_point(&self, _point: kurbo::Point) -> piet::HitTestPoint {
         todo!()
     }
 
-    fn hit_test_text_position(&self, idx: usize) -> piet::HitTestPosition {
+    fn hit_test_text_position(&self, _idx: usize) -> piet::HitTestPosition {
         todo!()
     }
 }
