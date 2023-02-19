@@ -28,10 +28,10 @@ use cosmic_text::fontdb::{Database, Family};
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
 use piet::kurbo::{Point, Rect, Size};
-use piet::{util, LineMetric};
-use piet::{Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
+use piet::{util, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
 
 use std::cell::{Cell, Ref, RefCell};
+use std::cmp;
 use std::fmt;
 use std::mem;
 use std::ops::{Range, RangeBounds};
@@ -129,6 +129,29 @@ impl Text {
             buffer: Cell::new(Vec::new()),
         }))
     }
+
+    /// Run a closure with access to the underlying `FontSystem`.
+    ///
+    /// # Notes
+    ///
+    /// Loading new fonts while this function is in use will result in an error.
+    pub fn with_font_system<R>(&self, f: impl FnOnce(&FontSystem) -> R) -> R {
+        let mut font_db = self.0.font_db.borrow();
+
+        loop {
+            match &*font_db {
+                FontDatabase::Cosmic(fs) => return f(fs),
+                FontDatabase::FontDb { .. } => {
+                    drop(font_db);
+                    let mut mut_ref = self.0.font_db.borrow_mut();
+                    mut_ref.font_system();
+                    drop(mut_ref);
+                    font_db = self.0.font_db.borrow();
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
 }
 
 impl Default for Text {
@@ -181,7 +204,7 @@ impl piet::Text for Text {
     }
 }
 
-/// The text layout builder used by the [`RenderContext`].
+/// The text layout builder used by the [`Text`].
 pub struct TextLayoutBuilder {
     /// Handle to the original `Text` object.
     handle: Text,
@@ -249,7 +272,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             string,
             defaults,
             max_width,
-
+            range_attributes,
             error,
             ..
         } = self;
@@ -264,7 +287,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 
         // NOTE: Pango uses a default line height of 0, and piet-cairo doesn't appear to
         // change this.
-        let metrics = Metrics::new(font_size as _, 0);
+        let metrics = Metrics::new(font_size as _, font_size as _);
 
         // Get the default attributes for the layout.
         let default_attrs = {
@@ -300,9 +323,55 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             let end = start + line.len() + 1;
 
             // Get the attributes for this line.
-            let attrs_list = AttrsList::new(default_attrs);
+            let mut attrs_list = AttrsList::new(default_attrs);
 
-            // TODO: normalize everything here
+            // TODO: This algorithm is quadratic time, use something more efficient.
+            for (range, alg) in &range_attributes {
+                if let Some(range) = intersect_ranges(&range, &(start..end)) {
+                    let range = range.start - start..range.end - start;
+
+                    match alg {
+                        TextAttribute::FontFamily(family) => {
+                            attrs_list.add_span(range, default_attrs.family(cvt_family(&family)));
+                        }
+                        TextAttribute::FontSize(_) => {
+                            // TODO: Implement variable font sizes.
+                            return Err(Error::Unimplemented);
+                        }
+                        TextAttribute::Weight(weight) => {
+                            attrs_list.add_span(range, default_attrs.weight(cvt_weight(*weight)));
+                        }
+                        TextAttribute::Style(style) => {
+                            attrs_list.add_span(range, default_attrs.style(cvt_style(*style)));
+                        }
+                        TextAttribute::TextColor(color) => {
+                            if *color != util::DEFAULT_TEXT_COLOR {
+                                attrs_list.add_span(range, default_attrs.color(cvt_color(*color)));
+                            }
+                        }
+                        TextAttribute::Underline(_) => {
+                            attrs_list.add_span(
+                                range,
+                                default_attrs.metadata({
+                                    let mut metadata = Metadata::new();
+                                    metadata.set_underline(true);
+                                    metadata.into_raw()
+                                }),
+                            );
+                        }
+                        TextAttribute::Strikethrough(_) => {
+                            attrs_list.add_span(
+                                range,
+                                default_attrs.metadata({
+                                    let mut metadata = Metadata::new();
+                                    metadata.set_strikethrough(true);
+                                    metadata.into_raw()
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
 
             buffer_lines.push(BufferLine::new(line, attrs_list));
 
@@ -405,11 +474,6 @@ impl TextLayout {
     pub fn layout_runs(&self) -> LayoutRunIter<'_, '_> {
         self.buffer().layout_runs()
     }
-
-    /// Get an iterator over the line metrics.
-    fn line_metrics(&self) -> impl Iterator<Item = LineMetric> + '_ {
-        self.layout_runs().map(|_layout| todo!())
-    }
 }
 
 impl piet::TextLayout for TextLayout {
@@ -465,7 +529,20 @@ impl piet::TextLayout for TextLayout {
     }
 
     fn line_metric(&self, line_number: usize) -> Option<piet::LineMetric> {
-        self.line_metrics().nth(line_number)
+        self.layout_runs().nth(line_number).map(|run| {
+            let (start, end) = run.glyphs.iter().fold((0, 0), |(start, end), glyph| {
+                (cmp::min(start, glyph.start), cmp::max(end, glyph.end))
+            });
+
+            piet::LineMetric {
+                start_offset: start,
+                end_offset: end,
+                trailing_whitespace: 0, // TODO
+                y_offset: run.line_y as _,
+                height: self.glyph_size as _,
+                baseline: run.line_y as f64 + self.glyph_size as f64,
+            }
+        })
     }
 
     fn line_count(&self) -> usize {
@@ -482,7 +559,8 @@ impl piet::TextLayout for TextLayout {
             return htp;
         }
 
-        todo!("Calculate the closest index to the point.")
+        // TODO
+        htp
     }
 
     fn hit_test_text_position(&self, idx: usize) -> piet::HitTestPosition {
