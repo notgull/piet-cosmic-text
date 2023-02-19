@@ -8,7 +8,11 @@ Implements [`piet`]'s [`Text`] interface using the [`cosmic-text`] crate.
 
 ## License
 
-This project is licensed under either of
+`piet-cosmic-text` is free software: you can redistribute it and/or modify it under the terms of either:
 
-  * Apache License, Version 2.0, ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-  * MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+* GNU Lesser General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+* Mozilla Public License as published by the Mozilla Foundation, version 2. 
+
+`piet-cosmic-text` is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License or the Mozilla Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License and the Mozilla Public License along with `piet-cosmic-text`. If not, see <https://www.gnu.org/licenses/>. 
