@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR MPL-2.0
 // This file is a part of `piet-cosmic-text`.
-// 
+//
 // `piet-cosmic-text` is free software: you can redistribute it and/or modify it under the
 // terms of either:
 //
 // * GNU Lesser General Public License as published by the Free Software Foundation, either
 //   version 3 of the License, or (at your option) any later version.
 // * Mozilla Public License as published by the Mozilla Foundation, version 2.
-// 
-// `piet-cosmic-text` is distributed in the hope that it will be useful, but WITHOUT ANY 
+//
+// `piet-cosmic-text` is distributed in the hope that it will be useful, but WITHOUT ANY
 // WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
 // PURPOSE. See the GNU Lesser General Public License or the Mozilla Public License for more
 // details.
-// 
+//
 // You should have received a copy of the GNU Lesser General Public License and the Mozilla
-// Public License along with `piet-cosmic-text`. If not, see <https://www.gnu.org/licenses/>. 
+// Public License along with `piet-cosmic-text`. If not, see <https://www.gnu.org/licenses/>.
 
 //! An implementation of [`piet`]'s text API using [`cosmic-text`].
 //!
@@ -244,6 +244,16 @@ pub struct TextLayoutBuilder {
     error: Option<Error>,
 }
 
+impl fmt::Debug for TextLayoutBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextLayoutBuilder")
+            .field("string", &self.string.as_str())
+            .field("max_width", &self.max_width)
+            .field("range_attributes", &self.range_attributes)
+            .finish_non_exhaustive()
+    }
+}
+
 impl piet::TextLayoutBuilder for TextLayoutBuilder {
     type Out = TextLayout;
 
@@ -443,6 +453,15 @@ pub struct TextLayout {
 
     /// A wrapper around a buffer but with the lifetime requirement elided.
     buffer: Rc<SelfRefBuffer>,
+}
+
+impl fmt::Debug for TextLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextLayout")
+            .field("string", &self.string.as_str())
+            .field("glyph_size", &self.glyph_size)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A wrapper around a self-referencing buffer that we can impl Drop on.
