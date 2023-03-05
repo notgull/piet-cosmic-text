@@ -244,6 +244,16 @@ pub struct TextLayoutBuilder {
     error: Option<Error>,
 }
 
+impl fmt::Debug for TextLayoutBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextLayoutBuilder")
+            .field("string", &self.string.as_str())
+            .field("max_width", &self.max_width)
+            .field("range_attributes", &self.range_attributes)
+            .finish_non_exhaustive()
+    }
+}
+
 impl piet::TextLayoutBuilder for TextLayoutBuilder {
     type Out = TextLayout;
 
@@ -443,6 +453,15 @@ pub struct TextLayout {
 
     /// A wrapper around a buffer but with the lifetime requirement elided.
     buffer: Rc<SelfRefBuffer>,
+}
+
+impl fmt::Debug for TextLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TextLayout")
+            .field("string", &self.string.as_str())
+            .field("glyph_size", &self.glyph_size)
+            .finish_non_exhaustive()
+    }
 }
 
 /// A wrapper around a self-referencing buffer that we can impl Drop on.
