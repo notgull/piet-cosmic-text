@@ -42,16 +42,15 @@
 #![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
-use cosmic_text::fontdb::{Database, Family};
+use cosmic_text::fontdb::Family;
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
 use piet::kurbo::{Point, Rect, Size};
 use piet::{util, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, RefCell};
 use std::cmp;
 use std::fmt;
-use std::mem;
 use std::ops::{Range, RangeBounds};
 use std::rc::Rc;
 
@@ -120,7 +119,7 @@ pub struct Text(Rc<Inner>);
 
 struct Inner {
     /// Font database.
-    font_db: RefCell<FontDatabase>,
+    font_db: RefCell<FontSystem>,
 
     /// Buffer that holds lines of text.
     ///
@@ -143,7 +142,7 @@ impl Text {
     /// Create a new `Text` renderer from a `FontSystem`.
     pub fn from_font_system(font_system: FontSystem) -> Self {
         Self(Rc::new(Inner {
-            font_db: RefCell::new(FontDatabase::Cosmic(font_system)),
+            font_db: RefCell::new(font_system),
             buffer: Cell::new(Vec::new()),
         }))
     }
@@ -154,21 +153,18 @@ impl Text {
     ///
     /// Loading new fonts while this function is in use will result in an error.
     pub fn with_font_system<R>(&self, f: impl FnOnce(&FontSystem) -> R) -> R {
-        let mut font_db = self.0.font_db.borrow();
+        let font_db = self.0.font_db.borrow();
+        f(&font_db)
+    }
 
-        loop {
-            match &*font_db {
-                FontDatabase::Cosmic(fs) => return f(fs),
-                FontDatabase::FontDb { .. } => {
-                    drop(font_db);
-                    let mut mut_ref = self.0.font_db.borrow_mut();
-                    mut_ref.font_system();
-                    drop(mut_ref);
-                    font_db = self.0.font_db.borrow();
-                }
-                _ => unreachable!(),
-            }
-        }
+    /// Run a closure with mutable access to the underlying `FontSystem`.
+    ///
+    /// # Notes
+    ///
+    /// Loading new fonts while this function is in use will result in an error.
+    pub fn with_font_system_mut<R>(&self, f: impl FnOnce(&mut FontSystem) -> R) -> R {
+        let mut font_db = self.0.font_db.borrow_mut();
+        f(&mut font_db)
     }
 }
 
@@ -183,31 +179,46 @@ impl piet::Text for Text {
     type TextLayoutBuilder = TextLayoutBuilder;
 
     fn font_family(&mut self, family_name: &str) -> Option<FontFamily> {
-        self.0
-            .font_db
-            .try_borrow()
-            .ok()
-            .and_then(|font_db| font_db.font_family_by_name(family_name))
+        let db = self.0.font_db.try_borrow().ok()?;
+
+        // Get the font family.
+        let family = Family::Name(family_name);
+        let name = db.db().family_name(&family);
+
+        // Look for the font with that name.
+        let x = db
+            .db()
+            .faces()
+            .flat_map(|face| &face.families)
+            .find(|(face, _)| *face == name)
+            .map(|(face, _)| FontFamily::new_unchecked(face.clone()));
+
+        x
     }
 
     fn load_font(&mut self, data: &[u8]) -> Result<FontFamily, Error> {
-        self.0
-            .font_db
-            .try_borrow_mut()
-            .map_err(|_| {
-                Error::BackendError(
-                    "tried to load font while TextLayoutBuilder/TextLayout is alive".into(),
-                )
-            })
-            .and_then(|mut font_db| font_db.load_font(data))
+        let font_name = font_name(data)?;
+
+        // Fast path: try to load the font by its name.
+        if let Some(family) = self.font_family(&font_name) {
+            return Ok(family);
+        }
+
+        // Slow path: insert the font into the database and then try to load it by its name.
+        {
+            let mut db = self
+                .0
+                .font_db
+                .try_borrow_mut()
+                .map_err(|_| Error::FontLoadingFailed)?;
+            db.db_mut().load_font_data(data.into());
+        }
+
+        self.font_family(&font_name)
+            .ok_or_else(|| Error::FontLoadingFailed)
     }
 
     fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
-        // Force the font database to enter FontSystem mode.
-        if !matches!(&*self.0.font_db.borrow(), FontDatabase::Cosmic(_)) {
-            self.0.font_db.borrow_mut().font_system();
-        }
-
         let text = Rc::new(text);
 
         TextLayoutBuilder {
@@ -406,38 +417,27 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             offset = end;
         }
 
-        // Build the self-referencing structure.
-        let inner = SelfRefBufferInnerTryBuilder::<_, _, Error> {
-            text: handle,
-            font_db_builder: |text| Ok(text.0.font_db.borrow()),
-            buffer_builder: move |font_db| {
-                let font_system = match &**font_db {
-                    FontDatabase::Cosmic(font_system) => font_system,
-                    FontDatabase::FontDb { .. } => {
-                        return Err(Error::BackendError(
-                            "font was added while TextLayoutBuilder is alive".into(),
-                        ));
-                    }
-                    _ => unreachable!(),
-                };
+        let buffer = {
+            let mut font_system = handle.0.font_db.borrow_mut();
+            let mut buffer = Buffer::new(&mut font_system, metrics);
 
-                let mut buffer = Buffer::new(font_system, metrics);
-                buffer.lines = buffer_lines;
-                buffer.set_size(max_width as i32, i32::MAX);
-                buffer.set_wrap(cosmic_text::Wrap::Word);
+            buffer.lines = buffer_lines;
+            buffer.set_size(&mut font_system, max_width as f32, f32::INFINITY);
+            buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
 
-                // Shape the buffer.
-                buffer.shape_until_scroll();
+            // Shape the buffer.
+            buffer.shape_until_scroll(&mut font_system);
 
-                Ok(buffer)
-            },
-        }
-        .try_build()?;
+            buffer
+        };
 
         Ok(TextLayout {
             string,
             glyph_size: font_size as i32,
-            buffer: Rc::new(SelfRefBuffer(inner)),
+            text_buffer: Rc::new(BufferWrapper {
+                buffer: Some(buffer),
+                handle,
+            }),
         })
     }
 }
@@ -451,8 +451,8 @@ pub struct TextLayout {
     /// The size of the glyph in pixels.
     glyph_size: i32,
 
-    /// A wrapper around a buffer but with the lifetime requirement elided.
-    buffer: Rc<SelfRefBuffer>,
+    /// The text buffer.
+    text_buffer: Rc<BufferWrapper>,
 }
 
 impl fmt::Debug for TextLayout {
@@ -464,51 +464,43 @@ impl fmt::Debug for TextLayout {
     }
 }
 
-/// A wrapper around a self-referencing buffer that we can impl Drop on.
-struct SelfRefBuffer(SelfRefBufferInner);
+struct BufferWrapper {
+    /// The original buffer.
+    buffer: Option<Buffer>,
 
-#[ouroboros::self_referencing]
-struct SelfRefBufferInner {
-    /// Handle to the `Text` renderer.
-    text: Text,
-
-    /// Reference to the font database.
-    #[borrows(text)]
-    #[covariant]
-    font_db: Ref<'this, FontDatabase>,
-
-    /// The buffer that holds the rendered text.
-    #[borrows(font_db)]
-    #[covariant]
-    buffer: Buffer<'this>,
+    /// The text handle.
+    handle: Text,
 }
 
-impl Drop for SelfRefBuffer {
+impl BufferWrapper {
+    fn buffer(&self) -> &Buffer {
+        self.buffer.as_ref().unwrap()
+    }
+}
+
+impl Drop for BufferWrapper {
     fn drop(&mut self) {
-        let text = self.0.borrow_text().clone();
-        self.0.with_buffer_mut(|buf| {
-            let mut old_cache = text.0.buffer.take();
-            let mut new_cache = mem::take(&mut buf.lines);
-            new_cache.clear();
+        let mut buffer = self.buffer.take().unwrap();
+        buffer.lines.clear();
+        let old_lines = self.handle.0.buffer.take();
 
-            // If the capacity of the new cache is larger than the old cache, swap them.
-            if new_cache.capacity() > old_cache.capacity() {
-                mem::swap(&mut new_cache, &mut old_cache);
-            }
-
-            text.0.buffer.set(old_cache);
-        })
+        // Use whichever buffer has the most lines.
+        if old_lines.capacity() > buffer.lines.capacity() {
+            self.handle.0.buffer.set(old_lines);
+        } else {
+            self.handle.0.buffer.set(buffer.lines);
+        }
     }
 }
 
 impl TextLayout {
     /// Get a reference to the inner `Buffer`.
-    pub fn buffer(&self) -> &Buffer<'_> {
-        self.buffer.0.borrow_buffer()
+    pub fn buffer(&self) -> &Buffer {
+        self.text_buffer.buffer()
     }
 
     /// Get an iterator over the layout runs.
-    pub fn layout_runs(&self) -> LayoutRunIter<'_, '_> {
+    pub fn layout_runs(&self) -> LayoutRunIter<'_> {
         self.buffer().layout_runs()
     }
 }
@@ -520,7 +512,7 @@ impl piet::TextLayout for TextLayout {
                 let max_glyph_size = run
                     .glyphs
                     .iter()
-                    .map(|glyph| glyph.cache_key.font_size)
+                    .map(|glyph| f32::from_bits(glyph.cache_key.font_size_bits) as i32)
                     .max()
                     .unwrap_or(self.glyph_size);
 
@@ -529,7 +521,7 @@ impl piet::TextLayout for TextLayout {
                     size.width = new_width;
                 }
 
-                let new_height = (run.line_y + max_glyph_size) as f64;
+                let new_height = (run.line_y as i32 + max_glyph_size) as f64;
                 if new_height > size.height {
                     size.height = new_height;
                 }
@@ -590,7 +582,7 @@ impl piet::TextLayout for TextLayout {
         let mut htp = piet::HitTestPoint::default();
         let (x, y) = point.into();
 
-        if let Some(cursor) = self.buffer().hit(x as i32, y as i32) {
+        if let Some(cursor) = self.buffer().hit(x as f32, y as f32) {
             htp.idx = cursor.index;
             htp.is_inside = true;
             return htp;
@@ -626,117 +618,6 @@ impl piet::TextLayout for TextLayout {
         htp.point = point;
         htp.line = line;
         htp
-    }
-}
-
-enum FontDatabase {
-    /// The raw `fontdb` font database.
-    ///
-    /// This is used for adding new fonts to the system.
-    FontDb { _locale: String, db: Database },
-
-    /// The `cosmic-text` `FontSystem` structure.
-    ///
-    /// This is used to render text. It is not cheap to construct, so it should only be
-    /// constructed/destructed when we have to add new fonts.
-    Cosmic(FontSystem),
-
-    /// Empty hole.
-    Empty,
-}
-
-impl FontDatabase {
-    /// Get a font family by its name.
-    fn font_family_by_name(&self, name: &str) -> Option<FontFamily> {
-        let db = self.database();
-
-        // Get the font family.
-        let family = Family::Name(name);
-        let name = db.family_name(&family);
-
-        // Look for the font with that name.
-        db.faces()
-            .iter()
-            .find(|face| face.family == name)
-            .map(|face| FontFamily::new_unchecked(face.family.clone()))
-    }
-
-    /// Load a font by its raw bytes.
-    fn load_font(&mut self, bytes: &[u8]) -> Result<FontFamily, Error> {
-        let font_name = font_name(bytes)?;
-
-        // Fast path: try to load the font by its name.
-        if let Some(family) = self.font_family_by_name(&font_name) {
-            return Ok(family);
-        }
-
-        // Slow path: insert the font into the database and then try to load it by its name.
-        {
-            let db = self.database_mut();
-            db.load_font_data(bytes.into());
-        }
-
-        self.font_family_by_name(&font_name)
-            .ok_or_else(|| Error::FontLoadingFailed)
-    }
-
-    /// Get the font system.
-    fn font_system(&mut self) -> &mut FontSystem {
-        loop {
-            match self {
-                FontDatabase::FontDb { .. } => {
-                    // Replace this database with the corresponding `FontSystem`.
-                    let (locale, db) = match mem::replace(self, Self::Empty) {
-                        FontDatabase::FontDb {
-                            _locale: locale,
-                            db,
-                        } => (locale, db),
-                        _ => unreachable!(),
-                    };
-
-                    // Construct the font system.
-                    let font_system = FontSystem::new_with_locale_and_db(locale, db);
-                    *self = FontDatabase::Cosmic(font_system);
-                }
-                FontDatabase::Cosmic(font_system) => return font_system,
-                _ => unreachable!("cannot poll an empty hole"),
-            }
-        }
-    }
-
-    /// Get the underlying database.
-    ///
-    /// This does not mutate the structure.
-    fn database(&self) -> &Database {
-        match self {
-            FontDatabase::FontDb { db, .. } => db,
-            FontDatabase::Cosmic(cm) => cm.db(),
-            _ => unreachable!("cannot poll an empty hole"),
-        }
-    }
-
-    /// Get a mutable reference to the database.
-    fn database_mut(&mut self) -> &mut Database {
-        loop {
-            match self {
-                FontDatabase::FontDb { db, .. } => return db,
-                FontDatabase::Cosmic(_) => {
-                    // Replace this database with the corresponding `FontSystem`.
-                    let font_system = match mem::replace(self, Self::Empty) {
-                        FontDatabase::Cosmic(font_system) => font_system,
-                        _ => unreachable!(),
-                    };
-
-                    // Construct the font system.
-                    let (locale, db) = font_system.into_locale_and_db();
-                    *self = FontDatabase::FontDb {
-                        _locale: locale,
-                        db,
-                    };
-                }
-                _ => unreachable!("cannot poll an empty hole"),
-            }
-        }
     }
 }
 

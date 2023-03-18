@@ -37,3 +37,6 @@ ttf-parser = { version = "0.18.1", default-features = false, features = ["glyph-
 cosmic-text = { version = "0.7.0", features = ["swash"] }
 softbuffer = { version = "0.2.0", default-features = false, features = ["x11"] }
 winit = { version = "0.28.1", default-features = false, features = ["x11"] }
+
+[patch.crates-io]
+cosmic-text = { git = "https://github.com/pop-os/cosmic-text.git" }
