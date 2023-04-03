@@ -28,15 +28,12 @@ documentation = "https://docs.rs/piet-cosmic-text"
 homepage = "https://github.com/notgull/piet-cosmic-text#readme"
 
 [dependencies]
-cosmic-text = { version = "0.7.0", default-features = false, features = ["std"] }
+cosmic-text = { version = "0.8.0", default-features = false, features = ["std"] }
 ouroboros = { version = "0.15.6", default-features = false }
 piet = { version = "0.6.2", default-features = false }
 ttf-parser = { version = "0.18.1", default-features = false, features = ["glyph-names", "std"] }
 
 [dev-dependencies]
-cosmic-text = { version = "0.7.0", features = ["swash"] }
+cosmic-text = { version = "0.8.0", features = ["swash"] }
 softbuffer = { version = "0.2.0", default-features = false, features = ["x11"] }
 winit = { version = "0.28.1", default-features = false, features = ["x11"] }
-
-[patch.crates-io]
-cosmic-text = { git = "https://github.com/pop-os/cosmic-text.git" }
