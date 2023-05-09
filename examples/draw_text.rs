@@ -70,9 +70,12 @@ fn main() {
                 buffer.resize(width * height, 0);
             }
 
-            Event::RedrawRequested(_) => {
+            Event::RedrawEventsCleared => {
                 // Fill buffer with white.
                 buffer.fill(0x00FFFFFF);
+
+                // If we aren't loaded yet, don't draw anything.
+                if text.is_loaded() {
 
                 // Calculate text layout.
                 let text_layout = text
@@ -114,6 +117,11 @@ fn main() {
                         },
                     );
                 });
+
+            } else {
+                    // Wait a second then try again.
+                    control_flow.set_wait_timeout(std::time::Duration::from_secs(1));
+            }
 
                 // Push buffer to softbuffer.
                 context.set_buffer(&buffer, width as _, height as _);

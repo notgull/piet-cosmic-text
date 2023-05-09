@@ -46,16 +46,18 @@
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
 use async_channel::Receiver;
+use event_listener::Event;
+
 use cosmic_text::fontdb::Family;
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
 use piet::kurbo::{Point, Rect, Size};
 use piet::{util, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, RefMut};
 use std::cmp;
 use std::fmt;
-use std::ops::{Range, RangeBounds};
+use std::ops::{Deref, DerefMut, Range, RangeBounds};
 use std::rc::Rc;
 
 /// The metadata stored in the font's stylings.
@@ -126,31 +128,83 @@ struct Inner {
     /// Font database.
     font_db: RefCell<DelayedFontSystem>,
 
+    /// Wait for the font database to be free to load.
+    font_db_free: Event,
+
     /// Buffer that holds lines of text.
     ///
     /// These are held here so that they aren't constantly reallocated.
     buffer: Cell<Vec<BufferLine>>,
 }
 
+impl Inner {
+    fn borrow_font_system(&self) -> Option<FontSystemGuard<'_>> {
+        self.font_db
+            .try_borrow_mut()
+            .map(|font_db| FontSystemGuard {
+                font_db,
+                font_db_free: &self.font_db_free,
+            })
+            .ok()
+    }
+}
+
+struct FontSystemGuard<'a> {
+    /// The font system.
+    font_db: RefMut<'a, DelayedFontSystem>,
+
+    /// The event to signal.
+    font_db_free: &'a Event,
+}
+
+impl Deref for FontSystemGuard<'_> {
+    type Target = DelayedFontSystem;
+
+    fn deref(&self) -> &Self::Target {
+        &self.font_db
+    }
+}
+
+impl DerefMut for FontSystemGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.font_db
+    }
+}
+
+impl Drop for FontSystemGuard<'_> {
+    fn drop(&mut self) {
+        self.font_db_free.notify(usize::MAX);
+    }
+}
+
 /// Either a `FontSystem` or a handle that can be resolved to one.
+#[allow(clippy::large_enum_variant)] // No need to box the FontSystem since it will be used soon.
 enum DelayedFontSystem {
     /// The real font system.
     Real(FontSystem),
 
     /// We are waiting for a font system to be loaded.
     Waiting(Receiver<FontSystem>),
-
-    /// Empty.
-    Hole,
 }
 
 impl DelayedFontSystem {
     /// Get the font system.
-    fn get(&self) -> Option<&FontSystem> {
+    fn get(&mut self) -> Option<&mut FontSystem> {
         match self {
             Self::Real(font_system) => Some(font_system),
-            Self::Waiting(_) => None,
-            Self::Hole => None,
+            Self::Waiting(channel) => {
+                // Try to wait on the channel without blocking.
+                match channel.try_recv() {
+                    Ok(font_system) => {
+                        *self = Self::Real(font_system);
+                        self.get()
+                    }
+
+                    Err(async_channel::TryRecvError::Closed) => panic!("font system was dropped"),
+
+                    Err(async_channel::TryRecvError::Empty) => None,
+                }
+            }
         }
     }
 
@@ -159,15 +213,12 @@ impl DelayedFontSystem {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
-                Self::Waiting(_) => {
-                    match std::mem::replace(self, Self::Hole) {
-                        Self::Waiting(receiver) => {
-                            *self = Self::Real(receiver.recv().await.unwrap());
-                        }
-                        _ => unreachable!(),
+                Self::Waiting(recv) => match recv.recv().await {
+                    Ok(font_system) => {
+                        *self = Self::Real(font_system);
                     }
-                }
-                Self::Hole => panic!("font system was dropped"),
+                    Err(_) => panic!("font system was dropped"),
+                },
             }
         }
     }
@@ -177,15 +228,12 @@ impl DelayedFontSystem {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
-                Self::Waiting(_) => {
-                    match std::mem::replace(self, Self::Hole) {
-                        Self::Waiting(receiver) => {
-                            *self = Self::Real(receiver.recv_blocking().unwrap());
-                        }
-                        _ => unreachable!(),
+                Self::Waiting(recv) => match recv.recv_blocking() {
+                    Ok(font_system) => {
+                        *self = Self::Real(font_system);
                     }
-                }
-                Self::Hole => panic!("font system was dropped"),
+                    Err(_) => panic!("font system was dropped"),
+                },
             }
         }
     }
@@ -222,7 +270,8 @@ impl Text {
 
         Self(Rc::new(Inner {
             font_db: RefCell::new(DelayedFontSystem::Waiting(recv)),
-            buffer: Cell::new(Vec::new())
+            font_db_free: Event::new(),
+            buffer: Cell::new(Vec::new()),
         }))
     }
 
@@ -230,28 +279,58 @@ impl Text {
     pub fn from_font_system(font_system: FontSystem) -> Self {
         Self(Rc::new(Inner {
             font_db: RefCell::new(DelayedFontSystem::Real(font_system)),
+            font_db_free: Event::new(),
             buffer: Cell::new(Vec::new()),
         }))
     }
 
+    /// Tell if the font system is loaded.
+    pub fn is_loaded(&self) -> bool {
+        self.0
+            .borrow_font_system()
+            .map_or(false, |mut font_db| font_db.get().is_some())
+    }
+
     /// Wait for the font system to be loaded.
     pub async fn wait_for_load(&self) {
-        self.0.font_db.borrow_mut().wait().await;
+        loop {
+            if let Ok(mut guard) = self.0.font_db.try_borrow_mut() {
+                guard.wait().await;
+                return;
+            }
+
+            // Create an event listener.
+            let listener = self.0.font_db_free.listen();
+
+            if let Ok(mut guard) = self.0.font_db.try_borrow_mut() {
+                guard.wait().await;
+                return;
+            }
+
+            // Wait for the event to be signaled.
+            listener.await;
+        }
     }
 
     /// Wait for the font system to be loaded, blocking redux.
     pub fn wait_for_load_blocking(&self) {
-        self.0.font_db.borrow_mut().wait_blocking();
-    }
+        loop {
+            if let Ok(mut guard) = self.0.font_db.try_borrow_mut() {
+                guard.wait_blocking();
+                return;
+            }
 
-    /// Run a closure with access to the underlying `FontSystem`.
-    ///
-    /// # Notes
-    ///
-    /// Loading new fonts while this function is in use will result in an error.
-    pub fn with_font_system<R>(&self, f: impl FnOnce(&FontSystem) -> R) -> R {
-        let font_db = self.0.font_db.borrow();
-        f(&font_db)
+            // Create an event listener.
+            let listener = self.0.font_db_free.listen();
+
+            if let Ok(mut guard) = self.0.font_db.try_borrow_mut() {
+                guard.wait_blocking();
+                return;
+            }
+
+            // Wait for the event to be signaled.
+            listener.wait();
+        }
     }
 
     /// Run a closure with mutable access to the underlying `FontSystem`.
@@ -259,9 +338,9 @@ impl Text {
     /// # Notes
     ///
     /// Loading new fonts while this function is in use will result in an error.
-    pub fn with_font_system_mut<R>(&self, f: impl FnOnce(&mut FontSystem) -> R) -> R {
-        let mut font_db = self.0.font_db.borrow_mut();
-        f(&mut font_db)
+    pub fn with_font_system_mut<R>(&self, f: impl FnOnce(&mut FontSystem) -> R) -> Option<R> {
+        let mut font_db = self.0.borrow_font_system()?;
+        font_db.get().map(f)
     }
 }
 
@@ -276,21 +355,34 @@ impl piet::Text for Text {
     type TextLayoutBuilder = TextLayoutBuilder;
 
     fn font_family(&mut self, family_name: &str) -> Option<FontFamily> {
-        let db = self.0.font_db.try_borrow().ok()?;
+        let mut db_guard = self.0.borrow_font_system()?;
+        let db = db_guard.get()?;
+
+        // Look to see where it's used.
+        for (name, piet_name) in [
+            (Family::Serif, FontFamily::SERIF),
+            (Family::SansSerif, FontFamily::SANS_SERIF),
+            (Family::Monospace, FontFamily::MONOSPACE),
+        ] {
+            let name = db.db().family_name(&name);
+            if name == family_name {
+                return Some(piet_name);
+            }
+        }
 
         // Get the font family.
         let family = Family::Name(family_name);
         let name = db.db().family_name(&family);
 
         // Look for the font with that name.
-        let x = db
+        let font = db
             .db()
             .faces()
             .flat_map(|face| &face.families)
             .find(|(face, _)| *face == name)
             .map(|(face, _)| FontFamily::new_unchecked(face.clone()));
 
-        x
+        font
     }
 
     fn load_font(&mut self, _data: &[u8]) -> Result<FontFamily, Error> {
@@ -499,15 +591,28 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         }
 
         let buffer = {
-            let mut font_system = handle.0.font_db.borrow_mut();
-            let mut buffer = Buffer::new(&mut font_system, metrics);
+            let mut font_system = handle
+                .0
+                .borrow_font_system()
+                .ok_or(Error::FontLoadingFailed)?;
+            let font_system = match font_system.get() {
+                Some(font_system) => font_system,
+                None => {
+                    tracing::warn!("Still waiting for font system to be loaded, returning error");
+                    return Err(Error::BackendError(
+                        "Still waiting for font system to be loaded".into(),
+                    ));
+                }
+            };
+
+            let mut buffer = Buffer::new(font_system, metrics);
 
             buffer.lines = buffer_lines;
-            buffer.set_size(&mut font_system, max_width as f32, f32::INFINITY);
-            buffer.set_wrap(&mut font_system, cosmic_text::Wrap::Word);
+            buffer.set_size(font_system, max_width as f32, f32::INFINITY);
+            buffer.set_wrap(font_system, cosmic_text::Wrap::Word);
 
             // Shape the buffer.
-            buffer.shape_until_scroll(&mut font_system);
+            buffer.shape_until_scroll(font_system);
 
             buffer
         };
