@@ -5,6 +5,7 @@ Payment Platforms:
 
 Participating Contributors:
 - [John Nunley (notgull)](https://github.com/notgull)
+- [Jeff Uren (jdu)](https://github.com/jdu)
 
 ## Purpose
 
