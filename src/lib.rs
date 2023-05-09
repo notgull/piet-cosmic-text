@@ -644,7 +644,7 @@ fn font_name(font: &[u8]) -> Result<String, Error> {
     let name = font
         .names()
         .into_iter()
-        .find(|n| n.name_id == ttf_parser::name_id::FAMILY)
+        .find(|n| n.name_id == ttf_parser::name_id::FULL_NAME && n.is_unicode())
         .ok_or_else(|| Error::BackendError("font does not have a name with the main ID".into()))?;
 
     // TODO: Support macintosh encoding.
