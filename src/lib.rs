@@ -199,26 +199,10 @@ impl piet::Text for Text {
         x
     }
 
-    fn load_font(&mut self, data: &[u8]) -> Result<FontFamily, Error> {
-        let font_name = font_name(data)?;
-
-        // Fast path: try to load the font by its name.
-        if let Some(family) = self.font_family(&font_name) {
-            return Ok(family);
-        }
-
-        // Slow path: insert the font into the database and then try to load it by its name.
-        {
-            let mut db = self
-                .0
-                .font_db
-                .try_borrow_mut()
-                .map_err(|_| Error::FontLoadingFailed)?;
-            db.db_mut().load_font_data(data.into());
-        }
-
-        self.font_family(&font_name)
-            .ok_or_else(|| Error::FontLoadingFailed)
+    fn load_font(&mut self, _data: &[u8]) -> Result<FontFamily, Error> {
+        // TODO: Once cosmic-text uses font-db version 0.14, we can load fonts from data reliably.
+        // For now, we can't do this yet.
+        Err(Error::NotSupported)
     }
 
     fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
@@ -634,22 +618,6 @@ fn intersect_ranges(a: &Range<usize>, b: &Range<usize>) -> Option<Range<usize>> 
     } else {
         None
     }
-}
-
-fn font_name(font: &[u8]) -> Result<String, Error> {
-    // Parse it using ttf-parser
-    let font = ttf_parser::Face::parse(font, 0).map_err(|e| Error::BackendError(e.into()))?;
-
-    // Get the name with the main ID.
-    let name = font
-        .names()
-        .into_iter()
-        .find(|n| n.name_id == ttf_parser::name_id::FULL_NAME && n.is_unicode())
-        .ok_or_else(|| Error::BackendError("font does not have a name with the main ID".into()))?;
-
-    // TODO: Support macintosh encoding.
-    name.to_string()
-        .ok_or_else(|| Error::BackendError("font name is not valid UTF-16".into()))
 }
 
 fn points_to_pixels(points: f64) -> f64 {
