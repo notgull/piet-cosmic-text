@@ -45,6 +45,7 @@
 #![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
+use async_channel::Receiver;
 use cosmic_text::fontdb::Family;
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
@@ -120,14 +121,74 @@ impl Metadata {
 #[derive(Clone)]
 pub struct Text(Rc<Inner>);
 
+/// Inner shared data.
 struct Inner {
     /// Font database.
-    font_db: RefCell<FontSystem>,
+    font_db: RefCell<DelayedFontSystem>,
 
     /// Buffer that holds lines of text.
     ///
     /// These are held here so that they aren't constantly reallocated.
     buffer: Cell<Vec<BufferLine>>,
+}
+
+/// Either a `FontSystem` or a handle that can be resolved to one.
+enum DelayedFontSystem {
+    /// The real font system.
+    Real(FontSystem),
+
+    /// We are waiting for a font system to be loaded.
+    Waiting(Receiver<FontSystem>),
+
+    /// Empty.
+    Hole,
+}
+
+impl DelayedFontSystem {
+    /// Get the font system.
+    fn get(&self) -> Option<&FontSystem> {
+        match self {
+            Self::Real(font_system) => Some(font_system),
+            Self::Waiting(_) => None,
+            Self::Hole => None,
+        }
+    }
+
+    /// Wait until the font system is loaded.
+    async fn wait(&mut self) -> &mut FontSystem {
+        loop {
+            match self {
+                Self::Real(font_system) => return font_system,
+                Self::Waiting(_) => {
+                    match std::mem::replace(self, Self::Hole) {
+                        Self::Waiting(receiver) => {
+                            *self = Self::Real(receiver.recv().await.unwrap());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                Self::Hole => panic!("font system was dropped"),
+            }
+        }
+    }
+
+    /// Wait until the font system is loaded, blocking redux.
+    fn wait_blocking(&mut self) -> &mut FontSystem {
+        loop {
+            match self {
+                Self::Real(font_system) => return font_system,
+                Self::Waiting(_) => {
+                    match std::mem::replace(self, Self::Hole) {
+                        Self::Waiting(receiver) => {
+                            *self = Self::Real(receiver.recv_blocking().unwrap());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                Self::Hole => panic!("font system was dropped"),
+            }
+        }
+    }
 }
 
 impl fmt::Debug for Text {
@@ -139,15 +200,48 @@ impl fmt::Debug for Text {
 impl Text {
     /// Create a new `Text` renderer.
     pub fn new() -> Self {
-        Self::from_font_system(FontSystem::new())
+        #[cfg(feature = "rayon")]
+        {
+            Self::with_thread(Rayon)
+        }
+
+        #[cfg(not(feature = "rayon"))]
+        {
+            Self::with_thread(CurrentThread)
+        }
+    }
+
+    /// Create a new `Text` renderer with the given thread to push work to.
+    pub fn with_thread(thread: impl ExportWork) -> Self {
+        let (send, recv) = async_channel::bounded(1);
+
+        thread.run(move || {
+            let fs = FontSystem::new();
+            send.try_send(fs).ok();
+        });
+
+        Self(Rc::new(Inner {
+            font_db: RefCell::new(DelayedFontSystem::Waiting(recv)),
+            buffer: Cell::new(Vec::new())
+        }))
     }
 
     /// Create a new `Text` renderer from a `FontSystem`.
     pub fn from_font_system(font_system: FontSystem) -> Self {
         Self(Rc::new(Inner {
-            font_db: RefCell::new(font_system),
+            font_db: RefCell::new(DelayedFontSystem::Real(font_system)),
             buffer: Cell::new(Vec::new()),
         }))
+    }
+
+    /// Wait for the font system to be loaded.
+    pub async fn wait_for_load(&self) {
+        self.0.font_db.borrow_mut().wait().await;
+    }
+
+    /// Wait for the font system to be loaded, blocking redux.
+    pub fn wait_for_load_blocking(&self) {
+        self.0.font_db.borrow_mut().wait_blocking();
     }
 
     /// Run a closure with access to the underlying `FontSystem`.
@@ -605,6 +699,34 @@ impl piet::TextLayout for TextLayout {
         htp.point = point;
         htp.line = line;
         htp
+    }
+}
+
+/// Trait for exporting work to another thread.
+pub trait ExportWork {
+    /// Run this closure on another thread.
+    fn run(self, f: impl FnOnce() + Send + 'static);
+}
+
+/// Run work on the current thread.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct CurrentThread;
+
+impl ExportWork for CurrentThread {
+    fn run(self, f: impl FnOnce() + Send + 'static) {
+        f()
+    }
+}
+
+/// Run work on the `rayon` thread pool.
+#[cfg(feature = "rayon")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Rayon;
+
+#[cfg(feature = "rayon")]
+impl ExportWork for Rayon {
+    fn run(self, f: impl FnOnce() + Send + 'static) {
+        rayon_core::spawn(f)
     }
 }
 
