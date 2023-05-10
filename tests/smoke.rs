@@ -19,6 +19,12 @@
 // You should have received a copy of the GNU Lesser General Public License and the Mozilla
 // Public License along with `piet-cosmic-text`. If not, see <https://www.gnu.org/licenses/>.
 
+#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+
+#[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
 use piet::{FontFamily, Text as _, TextLayout as _, TextLayoutBuilder as _};
 use piet_cosmic_text::Text;
 

@@ -21,20 +21,21 @@
 
 //! An example for drawing some basic text using `piet-cosmic-text` and `softbuffer`.
 
-use cosmic_text::SwashCache;
-
-use piet::{FontFamily, Text as _, TextLayoutBuilder as _};
-use piet_cosmic_text::Text;
-
-use winit::{
-    dpi::LogicalSize,
-    event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
-    platform::run_return::EventLoopExtRunReturn,
-    window::WindowBuilder,
-};
-
+#[cfg(not(target_family = "wasm"))]
 fn main() {
+    use cosmic_text::SwashCache;
+
+    use piet::{FontFamily, Text as _, TextLayoutBuilder as _};
+    use piet_cosmic_text::Text;
+
+    use winit::{
+        dpi::LogicalSize,
+        event::{Event, WindowEvent},
+        event_loop::{ControlFlow, EventLoop},
+        platform::run_return::EventLoopExtRunReturn,
+        window::WindowBuilder,
+    };
+
     let mut width = 720;
     let mut height = 480;
 
@@ -128,4 +129,9 @@ fn main() {
             _ => (),
         }
     });
+}
+
+#[cfg(target_family = "wasm")]
+fn main() {
+    // This example is not supported on WASM.
 }
