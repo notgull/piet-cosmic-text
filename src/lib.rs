@@ -248,12 +248,12 @@ impl fmt::Debug for Text {
 impl Text {
     /// Create a new `Text` renderer.
     pub fn new() -> Self {
-        #[cfg(feature = "rayon")]
+        #[cfg(all(feature = "rayon", not(target_arch = "wasm32")))]
         {
             Self::with_thread(Rayon)
         }
 
-        #[cfg(not(feature = "rayon"))]
+        #[cfg(not(all(feature = "rayon", not(target_arch = "wasm32"))))]
         {
             Self::with_thread(CurrentThread)
         }
