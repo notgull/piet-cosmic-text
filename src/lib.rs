@@ -288,13 +288,13 @@ impl Text {
                 let db = fs.db_mut();
 
                 let needs_system_fonts = {
-                    let needed_families = [Family::SansSerif, Family::Serif, Family::Monospace];
-                    needed_families.into_iter().all(|family| {
+                    let needed_families = [Family::SansSerif, Family::Serif];
+                    needed_families.into_iter().any(|family| {
                         db.query(&Query {
                             families: &[family],
                             ..Default::default()
                         })
-                        .is_some()
+                        .is_none()
                     })
                 };
 
@@ -304,8 +304,8 @@ impl Text {
                     // Load the Tuffy font style and set it as the default.
                     for mut font_to_load in [TUFFY, TUFFY_BOLD, TUFFY_BOLD_ITALIC, TUFFY_ITALIC] {
                         let mut data = vec![];
-                        if let Err(e) = lzma_rs::lzma_decompress(&mut font_to_load, &mut data) {
-                            tracing::error!("Failed to load embedded font: {}", e);
+                        if let Err(err) = lzma_rs::lzma_decompress(&mut font_to_load, &mut data) {
+                            tracing::error!("Failed to decompress font: {}", err);
                         } else {
                             db.load_font_source(Source::Binary(Arc::new(data)));
                         }
@@ -313,9 +313,23 @@ impl Text {
 
                     db.set_serif_family("Tuffy");
                     db.set_sans_serif_family("Tuffy");
-                    db.set_monospace_family("Tuffy");
+
+                    // Make sure they're all loaded.
+                    let queries = [Family::SansSerif, Family::Serif];
+                    for query in queries {
+                        debug_assert!(db
+                            .query(&Query {
+                                families: &[query],
+                                ..Default::default()
+                            })
+                            .is_some())
+                    }
+                    debug_assert_eq!(db.family_name(&Family::SansSerif), "Tuffy");
+                    debug_assert_eq!(db.family_name(&Family::Serif), "Tuffy");
                 }
             }
+
+            tracing::debug!("Loaded {} faces", fs.db().faces().count());
 
             // Send the font system back to the main thread.
             send.try_send(fs).ok();

@@ -30,6 +30,9 @@ use piet_cosmic_text::Text;
 
 #[test]
 fn layout() {
+    #[cfg(all(target_family = "wasm", not(target_os = "wasi")))]
+    console_log::init_with_level(log::Level::Trace).unwrap();
+
     let mut text = Text::new();
     for _ in 0..2 {
         // Load a layout.

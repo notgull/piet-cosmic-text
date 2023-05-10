@@ -41,10 +41,13 @@ tracing = { version = "0.1.37", default-features = false }
 
 [dev-dependencies]
 cosmic-text = { version = "0.8.0", features = ["swash"] }
+log = "0.4.17"
 softbuffer = { version = "0.2.0", default-features = false, features = ["x11"] }
+tracing = { version = "0.1.37", features = ["log"] }
 winit = { version = "0.28.1", default-features = false, features = ["x11"] }
 
 [target.'cfg(all(target_family = "wasm", not(target_os = "wasi")))'.dev-dependencies]
+console_log = "1.0.0"
 wasm-bindgen-test = "0.3.35"
 
 [features]
