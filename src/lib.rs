@@ -45,6 +45,20 @@
 #![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
+// Make sure we have a default font we can use.
+macro_rules! include_default_fonts {
+    ($(const $id:ident = $path:literal;)*) => {$(
+        const $id: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fonts/", $path));
+    )*}
+}
+
+include_default_fonts! {
+    const TUFFY = "Tuffy.lzma";
+    const TUFFY_BOLD = "Tuffy_Bold.lzma";
+    const TUFFY_BOLD_ITALIC = "Tuffy_Bold_Italic.lzma";
+    const TUFFY_ITALIC = "Tuffy_Italic.lzma";
+}
+
 use async_channel::Receiver;
 use event_listener::Event;
 
@@ -59,6 +73,7 @@ use std::cmp;
 use std::fmt;
 use std::ops::{Deref, DerefMut, Range, RangeBounds};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The metadata stored in the font's stylings.
 ///
@@ -264,7 +279,45 @@ impl Text {
         let (send, recv) = async_channel::bounded(1);
 
         thread.run(move || {
-            let fs = FontSystem::new();
+            // Load the font system.
+            let mut fs = FontSystem::new();
+
+            // If there are no system fonts installed, use the embedded fonts.
+            {
+                use cosmic_text::fontdb::{Query, Source};
+                let db = fs.db_mut();
+
+                let needs_system_fonts = {
+                    let needed_families = [Family::SansSerif, Family::Serif, Family::Monospace];
+                    needed_families.into_iter().all(|family| {
+                        db.query(&Query {
+                            families: &[family],
+                            ..Default::default()
+                        })
+                        .is_some()
+                    })
+                };
+
+                if needs_system_fonts {
+                    tracing::info!("No system fonts loaded, using embedded fonts.");
+
+                    // Load the Tuffy font style and set it as the default.
+                    for mut font_to_load in [TUFFY, TUFFY_BOLD, TUFFY_BOLD_ITALIC, TUFFY_ITALIC] {
+                        let mut data = vec![];
+                        if let Err(e) = lzma_rs::lzma_decompress(&mut font_to_load, &mut data) {
+                            tracing::error!("Failed to load embedded font: {}", e);
+                        } else {
+                            db.load_font_source(Source::Binary(Arc::new(data)));
+                        }
+                    }
+
+                    db.set_serif_family("Tuffy");
+                    db.set_sans_serif_family("Tuffy");
+                    db.set_monospace_family("Tuffy");
+                }
+            }
+
+            // Send the font system back to the main thread.
             send.try_send(fs).ok();
         });
 

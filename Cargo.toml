@@ -34,6 +34,7 @@ homepage = "https://github.com/notgull/piet-cosmic-text#readme"
 async-channel = "1.8.0"
 cosmic-text = { version = "0.8.0", default-features = false, features = ["std"] }
 event-listener = "2.5.3"
+lzma-rs = "0.3.0"
 piet = { version = "0.6.2", default-features = false }
 rayon-core = { version = "1.11.0", optional = true }
 tracing = { version = "0.1.37", default-features = false }
@@ -49,3 +50,6 @@ wasm-bindgen-test = "0.3.35"
 [features]
 default = ["rayon"]
 rayon = ["rayon-core"]
+
+[build-dependencies]
+lzma-rs = "0.3.0"

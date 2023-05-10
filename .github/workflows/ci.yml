@@ -43,6 +43,15 @@ jobs:
       - run: cargo build --no-default-features
       - name: Install cargo-hack
         uses: taiki-e/install-action@cargo-hack
+  
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Install Rust
+        run: rustup update stable
+      - uses: taiki-e/install-action@wasm-pack
+      - run: wasm-pack test --chrome --headless
 
   clippy:
     runs-on: ubuntu-latest
