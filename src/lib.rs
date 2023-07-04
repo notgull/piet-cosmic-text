@@ -60,6 +60,9 @@ use std::fmt;
 use std::ops::{Deref, DerefMut, Range, RangeBounds};
 use std::rc::Rc;
 
+const STANDARD_DPI: f64 = 92.0;
+const POINTS_PER_INCH: f64 = 72.0;
+
 /// The metadata stored in the font's stylings.
 ///
 /// This should be considered by the renderer in order to render extra decorations.
@@ -135,6 +138,9 @@ struct Inner {
     ///
     /// These are held here so that they aren't constantly reallocated.
     buffer: Cell<Vec<BufferLine>>,
+
+    /// The current dots-per-inch (DPI) of the rendering surface.
+    dpi: Cell<f64>,
 }
 
 impl Inner {
@@ -272,6 +278,7 @@ impl Text {
             font_db: RefCell::new(DelayedFontSystem::Waiting(recv)),
             font_db_free: Event::new(),
             buffer: Cell::new(Vec::new()),
+            dpi: Cell::new(STANDARD_DPI),
         }))
     }
 
@@ -281,7 +288,20 @@ impl Text {
             font_db: RefCell::new(DelayedFontSystem::Real(font_system)),
             font_db_free: Event::new(),
             buffer: Cell::new(Vec::new()),
+            dpi: Cell::new(STANDARD_DPI),
         }))
+    }
+
+    /// Get the current dots-per-inch (DPI) that this text renderer will use.
+    pub fn dpi(&self) -> f64 {
+        self.0.dpi.get()
+    }
+
+    /// Set the current dots-per-inch (DPI) that this renderer will use.
+    ///
+    /// Returns the old DPI.
+    pub fn set_dpi(&self, dpi: f64) -> f64 {
+        self.0.dpi.replace(dpi)
     }
 
     /// Tell if the font system is loaded.
@@ -402,6 +422,7 @@ impl piet::Text for Text {
             last_range_start_pos: 0,
             max_width: f64::INFINITY,
             error: None,
+            alignment: None,
         }
     }
 }
@@ -420,8 +441,15 @@ pub struct TextLayoutBuilder {
     /// The width constraint.
     max_width: f64,
 
+    /// Alignment for the text.
+    alignment: Option<TextAlignment>,
+
     /// The range attributes.
     range_attributes: Vec<(Range<usize>, TextAttribute)>,
+
+    /// The starting point for the last range.
+    ///
+    /// Used for error checking.
     last_range_start_pos: usize,
 
     /// The last error that occurred.
@@ -442,10 +470,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
     type Out = TextLayout;
 
     fn alignment(mut self, alignment: TextAlignment) -> Self {
-        // TODO: Support alignment.
-        if !matches!(alignment, TextAlignment::Start) {
-            self.error = Some(Error::NotSupported);
-        }
+        self.alignment = Some(alignment);
         self
     }
 
@@ -495,7 +520,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         }
 
         // Get the font size and line height.
-        let font_size = points_to_pixels(defaults.font_size);
+        let font_size = defaults.font_size * handle.dpi() / POINTS_PER_INCH;
 
         // NOTE: Pango uses a default line height of 0, and piet-cairo doesn't appear to
         // change this.
@@ -585,7 +610,15 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
                 }
             }
 
-            buffer_lines.push(BufferLine::new(line, attrs_list));
+            let mut line = BufferLine::new(line, attrs_list);
+            line.set_align(self.alignment.map(|a| match a {
+                TextAlignment::Start => cosmic_text::Align::Left,
+                TextAlignment::Center => cosmic_text::Align::Center,
+                TextAlignment::End => cosmic_text::Align::Right,
+                TextAlignment::Justified => cosmic_text::Align::Justified,
+            }));
+
+            buffer_lines.push(line);
 
             offset = end;
         }
@@ -796,9 +829,10 @@ impl piet::TextLayout for TextLayout {
             })
         });
 
-        let (line, point, _) = lines_and_glyphs
-            .find(|(_, _, range)| range.contains(&idx))
-            .expect("Index out of bounds.");
+        let (line, point, _) = match lines_and_glyphs.find(|(_, _, range)| range.contains(&idx)) {
+            Some(x) => x,
+            None => return piet::HitTestPosition::default(),
+        };
 
         let mut htp = piet::HitTestPosition::default();
         htp.point = point;
@@ -845,10 +879,6 @@ fn intersect_ranges(a: &Range<usize>, b: &Range<usize>) -> Option<Range<usize>> 
     } else {
         None
     }
-}
-
-fn points_to_pixels(points: f64) -> f64 {
-    points * 96.0 / 72.0
 }
 
 fn cvt_color(p: piet::Color) -> cosmic_text::Color {
