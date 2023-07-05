@@ -61,7 +61,7 @@ use std::fmt;
 use std::ops::{Deref, DerefMut, Range, RangeBounds};
 use std::rc::Rc;
 
-const STANDARD_DPI: f64 = 92.0;
+const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
 
 /// The metadata stored in the font's stylings.

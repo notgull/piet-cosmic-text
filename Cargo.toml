@@ -32,7 +32,7 @@ homepage = "https://github.com/notgull/piet-cosmic-text#readme"
 
 [dependencies]
 async-channel = "1.8.0"
-cosmic-text = { version = "0.8.0", default-features = false, features = ["std"] }
+cosmic-text = { version = "0.8.0", default-features = false }
 event-listener = "2.5.3"
 piet = { version = "0.6.2", default-features = false }
 rayon-core = { version = "1.11.0", optional = true }
