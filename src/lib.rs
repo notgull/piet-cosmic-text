@@ -56,6 +56,7 @@ use piet::{util, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::cmp;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut, Range, RangeBounds};
 use std::rc::Rc;
@@ -117,6 +118,34 @@ impl Metadata {
     }
 }
 
+/// Trait for exporting work to another thread.
+pub trait ExportWork {
+    /// Run this closure on another thread.
+    fn run(self, f: impl FnOnce() + Send + 'static);
+}
+
+/// Run work on the current thread.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct CurrentThread;
+
+impl ExportWork for CurrentThread {
+    fn run(self, f: impl FnOnce() + Send + 'static) {
+        f()
+    }
+}
+
+/// Run work on the `rayon` thread pool.
+#[cfg(feature = "rayon")]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Rayon;
+
+#[cfg(feature = "rayon")]
+impl ExportWork for Rayon {
+    fn run(self, f: impl FnOnce() + Send + 'static) {
+        rayon_core::spawn(f)
+    }
+}
+
 /// The text implementation entry point.
 ///
 /// # Limitations
@@ -125,6 +154,27 @@ impl Metadata {
 /// occur.
 #[derive(Clone)]
 pub struct Text(Rc<Inner>);
+
+impl fmt::Debug for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Borrowed;
+        impl fmt::Debug for Borrowed {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("<borrowed>")
+            }
+        }
+
+        let mut ds = f.debug_struct("Text");
+        let font_db = self.0.font_db.try_borrow();
+
+        let _ = match &font_db {
+            Ok(font_db) => ds.field("font_db", font_db),
+            Err(_) => ds.field("font_db", &Borrowed),
+        };
+
+        ds.field("dpi", &self.0.dpi.get()).finish()
+    }
+}
 
 /// Inner shared data.
 struct Inner {
@@ -193,6 +243,19 @@ enum DelayedFontSystem {
     Waiting(Receiver<FontSystem>),
 }
 
+impl fmt::Debug for DelayedFontSystem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Real(fs) => f
+                .debug_struct("FontSystem")
+                .field("db", fs.db())
+                .field("locale", &fs.locale())
+                .finish_non_exhaustive(),
+            Self::Waiting(_) => f.write_str("<waiting for availability>"),
+        }
+    }
+}
+
 impl DelayedFontSystem {
     /// Get the font system.
     fn get(&mut self) -> Option<&mut FontSystem> {
@@ -242,12 +305,6 @@ impl DelayedFontSystem {
                 },
             }
         }
-    }
-}
-
-impl fmt::Debug for Text {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Text { .. }")
     }
 }
 
@@ -412,13 +469,13 @@ impl piet::Text for Text {
     }
 
     fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
-        let text = Rc::new(text);
+        let text = Box::new(text);
 
         TextLayoutBuilder {
             handle: self.clone(),
             string: text,
             defaults: util::LayoutDefaults::default(),
-            range_attributes: vec![],
+            range_attributes: Attributes::default(),
             last_range_start_pos: 0,
             max_width: f64::INFINITY,
             error: None,
@@ -433,7 +490,7 @@ pub struct TextLayoutBuilder {
     handle: Text,
 
     /// The string we're laying out.
-    string: Rc<dyn TextStorage>,
+    string: Box<dyn TextStorage>,
 
     /// The default text attributes.
     defaults: util::LayoutDefaults,
@@ -445,7 +502,7 @@ pub struct TextLayoutBuilder {
     alignment: Option<TextAlignment>,
 
     /// The range attributes.
-    range_attributes: Vec<(Range<usize>, TextAttribute)>,
+    range_attributes: Attributes,
 
     /// The starting point for the last range.
     ///
@@ -498,7 +555,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         );
         self.last_range_start_pos = range.start;
 
-        self.range_attributes.push((range, attribute));
+        self.range_attributes.push(range, attribute);
 
         self
     }
@@ -513,6 +570,8 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             error,
             ..
         } = self;
+
+        println!("{:#?}", &range_attributes);
 
         // If an error occurred, return it.
         if let Some(error) = error {
@@ -560,55 +619,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             let end = start + line.len() + 1;
 
             // Get the attributes for this line.
-            let mut attrs_list = AttrsList::new(default_attrs);
-
-            // TODO: This algorithm is quadratic time, use something more efficient.
-            for (range, alg) in &range_attributes {
-                if let Some(range) = intersect_ranges(range, &(start..end)) {
-                    let range = range.start - start..range.end - start;
-
-                    match alg {
-                        TextAttribute::FontFamily(family) => {
-                            attrs_list.add_span(range, default_attrs.family(cvt_family(family)));
-                        }
-                        TextAttribute::FontSize(_) => {
-                            // TODO: Implement variable font sizes.
-                            return Err(Error::Unimplemented);
-                        }
-                        TextAttribute::Weight(weight) => {
-                            attrs_list.add_span(range, default_attrs.weight(cvt_weight(*weight)));
-                        }
-                        TextAttribute::Style(style) => {
-                            attrs_list.add_span(range, default_attrs.style(cvt_style(*style)));
-                        }
-                        TextAttribute::TextColor(color) => {
-                            if *color != util::DEFAULT_TEXT_COLOR {
-                                attrs_list.add_span(range, default_attrs.color(cvt_color(*color)));
-                            }
-                        }
-                        TextAttribute::Underline(_) => {
-                            attrs_list.add_span(
-                                range,
-                                default_attrs.metadata({
-                                    let mut metadata = Metadata::new();
-                                    metadata.set_underline(true);
-                                    metadata.into_raw()
-                                }),
-                            );
-                        }
-                        TextAttribute::Strikethrough(_) => {
-                            attrs_list.add_span(
-                                range,
-                                default_attrs.metadata({
-                                    let mut metadata = Metadata::new();
-                                    metadata.set_strikethrough(true);
-                                    metadata.into_raw()
-                                }),
-                            );
-                        }
-                    }
-                }
-            }
+            let attrs_list = range_attributes.text_attributes(start..end, default_attrs)?;
 
             let mut line = BufferLine::new(line, attrs_list);
             line.set_align(self.alignment.map(|a| match a {
@@ -651,9 +662,9 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         };
 
         Ok(TextLayout {
-            string,
-            glyph_size: font_size as i32,
             text_buffer: Rc::new(BufferWrapper {
+                string,
+                glyph_size: font_size as i32,
                 buffer: Some(buffer),
                 handle,
             }),
@@ -664,12 +675,6 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 /// A text layout.
 #[derive(Clone)]
 pub struct TextLayout {
-    /// The original string.
-    string: Rc<dyn TextStorage>,
-
-    /// The size of the glyph in pixels.
-    glyph_size: i32,
-
     /// The text buffer.
     text_buffer: Rc<BufferWrapper>,
 }
@@ -677,13 +682,19 @@ pub struct TextLayout {
 impl fmt::Debug for TextLayout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TextLayout")
-            .field("string", &self.string.as_str())
-            .field("glyph_size", &self.glyph_size)
+            .field("string", &self.text_buffer.string.as_str())
+            .field("glyph_size", &self.text_buffer.glyph_size)
             .finish_non_exhaustive()
     }
 }
 
 struct BufferWrapper {
+    /// The original string.
+    string: Box<dyn TextStorage>,
+
+    /// The size of the glyph in pixels.
+    glyph_size: i32,
+
     /// The original buffer.
     buffer: Option<Buffer>,
 
@@ -733,7 +744,7 @@ impl piet::TextLayout for TextLayout {
                     .iter()
                     .map(|glyph| f32::from_bits(glyph.cache_key.font_size_bits) as i32)
                     .max()
-                    .unwrap_or(self.glyph_size);
+                    .unwrap_or(self.text_buffer.glyph_size);
 
                 let new_width = run.line_w as f64;
                 if new_width > size.width {
@@ -760,7 +771,7 @@ impl piet::TextLayout for TextLayout {
     }
 
     fn text(&self) -> &str {
-        &self.string
+        &self.text_buffer.string
     }
 
     fn line_text(&self, line_number: usize) -> Option<&str> {
@@ -773,7 +784,7 @@ impl piet::TextLayout for TextLayout {
         let start = run.glyphs[0].start;
         let end = run.glyphs.last().unwrap().end;
 
-        Some(&self.string[start..end])
+        Some(&self.text_buffer.string[start..end])
     }
 
     fn line_metric(&self, line_number: usize) -> Option<piet::LineMetric> {
@@ -787,8 +798,8 @@ impl piet::TextLayout for TextLayout {
                 end_offset: end,
                 trailing_whitespace: 0, // TODO
                 y_offset: run.line_y as _,
-                height: self.glyph_size as _,
-                baseline: run.line_y as f64 + self.glyph_size as f64,
+                height: self.text_buffer.glyph_size as _,
+                baseline: run.line_y as f64 + self.text_buffer.glyph_size as f64,
             }
         })
     }
@@ -820,7 +831,9 @@ impl piet::TextLayout for TextLayout {
                     {
                         // Get the point.
                         let x = glyph.x_int as f64;
-                        let y = run.line_y as f64 + glyph.y_int as f64 + self.glyph_size as f64;
+                        let y = run.line_y as f64
+                            + glyph.y_int as f64
+                            + self.text_buffer.glyph_size as f64;
 
                         Point::new(x, y)
                     },
@@ -841,43 +854,192 @@ impl piet::TextLayout for TextLayout {
     }
 }
 
-/// Trait for exporting work to another thread.
-pub trait ExportWork {
-    /// Run this closure on another thread.
-    fn run(self, f: impl FnOnce() + Send + 'static);
+/// The text attribute ranges.
+#[derive(Default)]
+struct Attributes {
+    /// List of text attributes.
+    attributes: Vec<TextAttribute>,
+
+    /// The starts and ends of the range.
+    ///
+    /// The `usize` in the `RangeEnd` are indices into `attributes`.
+    ends: BTreeMap<usize, Vec<RangeEnd>>,
 }
 
-/// Run work on the current thread.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct CurrentThread;
+impl fmt::Debug for Attributes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        /// Format a text attribute.
+        struct FmtTextAttribute<'a>(&'a Attributes, usize);
+        impl fmt::Debug for FmtTextAttribute<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let attr = self.0.attributes.get(self.1).unwrap();
+                fmt::Debug::fmt(attr, f)
+            }
+        }
 
-impl ExportWork for CurrentThread {
-    fn run(self, f: impl FnOnce() + Send + 'static) {
-        f()
+        /// Format a range end.
+        struct WrapFmt<'a, T>(&'a str, T);
+        impl<T: fmt::Debug> fmt::Debug for WrapFmt<'_, T> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_tuple(self.0).field(&self.1).finish()
+            }
+        }
+
+        /// Format a list of range ends.
+        struct FmtRangeEnds<'a>(&'a Attributes, &'a [RangeEnd]);
+        impl fmt::Debug for FmtRangeEnds<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                let ends = self.1.iter().map(|end| match end {
+                    RangeEnd::Start(index) => WrapFmt("Start", FmtTextAttribute(self.0, *index)),
+                    RangeEnd::End(index) => WrapFmt("End", FmtTextAttribute(self.0, *index)),
+                });
+
+                f.debug_list().entries(ends).finish()
+            }
+        }
+
+        /// Format a list of ends.
+        struct FmtEnds<'a>(&'a Attributes);
+        impl fmt::Debug for FmtEnds<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_map()
+                    .entries(
+                        self.0
+                            .ends
+                            .iter()
+                            .map(|(&index, ends)| (index, FmtRangeEnds(self.0, ends))),
+                    )
+                    .finish()
+            }
+        }
+
+        f.debug_tuple("Attributes").field(&FmtEnds(self)).finish()
     }
 }
 
-/// Run work on the `rayon` thread pool.
-#[cfg(feature = "rayon")]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct Rayon;
+/// The start or end of a text attribute range.
+#[derive(Debug)]
+enum RangeEnd {
+    /// The start of the range.
+    Start(usize),
 
-#[cfg(feature = "rayon")]
-impl ExportWork for Rayon {
-    fn run(self, f: impl FnOnce() + Send + 'static) {
-        rayon_core::spawn(f)
-    }
+    /// The end of the range.
+    End(usize),
 }
 
-/// Intersection of two ranges.
-fn intersect_ranges(a: &Range<usize>, b: &Range<usize>) -> Option<Range<usize>> {
-    let start = a.start.max(b.start);
-    let end = a.end.min(b.end);
+impl Attributes {
+    /// Add a text attribute to the range.
+    fn push(&mut self, range: Range<usize>, attr: TextAttribute) {
+        // Push the attribute itself.
+        let index = self.attributes.len();
+        self.attributes.push(attr);
 
-    if start < end {
-        Some(start..end)
-    } else {
-        None
+        // Push the range.
+        macro_rules! push_index {
+            ($pl:ident,$en:ident) => {{
+                let end = self.ends.entry(range.$pl).or_default();
+                end.push(RangeEnd::$en(index));
+            }};
+        }
+
+        push_index!(start, Start);
+        push_index!(end, End);
+    }
+
+    /// Collect text attributes into a list.
+    fn collect_attributes<'a>(
+        &'a self,
+        mut attrs: Attrs<'a>,
+        indices: impl Iterator<Item = usize>,
+    ) -> Result<Attrs<'a>, Error> {
+        for index in indices {
+            let piet_attr = self
+                .attributes
+                .get(index)
+                .ok_or_else(|| Error::BackendError("invalid attribute index".into()))?;
+            match piet_attr {
+                TextAttribute::FontFamily(family) => {
+                    attrs.family = cvt_family(family);
+                }
+                TextAttribute::FontSize(_) => {
+                    return Err(Error::Unimplemented);
+                }
+                TextAttribute::Strikethrough(true) => {
+                    attrs.metadata |= STRIKETHROUGH;
+                }
+                TextAttribute::Strikethrough(false) => {
+                    attrs.metadata &= !STRIKETHROUGH;
+                }
+                TextAttribute::Underline(true) => {
+                    attrs.metadata |= UNDERLINE;
+                }
+                TextAttribute::Underline(false) => {
+                    attrs.metadata &= !UNDERLINE;
+                }
+                TextAttribute::Style(style) => {
+                    attrs.style = cvt_style(*style);
+                }
+                TextAttribute::Weight(weight) => {
+                    attrs.weight = cvt_weight(*weight);
+                }
+                TextAttribute::TextColor(color) => {
+                    if *color != util::DEFAULT_TEXT_COLOR {
+                        attrs.color_opt = Some(cvt_color(*color));
+                    } else {
+                        attrs.color_opt = None;
+                    }
+                }
+            }
+        }
+
+        Ok(attrs)
+    }
+
+    /// Iterate over the text attributes.
+    fn text_attributes<'a>(
+        &'a self,
+        range: Range<usize>,
+        defaults: Attrs<'a>,
+    ) -> Result<AttrsList, Error> {
+        let mut last_index = 0;
+        let mut attr_list = vec![];
+        let mut result = AttrsList::new(defaults);
+
+        // Get the ranges within the range.
+        let ranges = self.ends.iter().filter_map(|(&index, ends)| {
+            if index >= range.end {
+                return None;
+            }
+
+            index.checked_sub(range.start).map(|index| (index, ends))
+        });
+
+        // Iterate over the ranges.
+        for (index, ends) in ranges {
+            // Collect the attributes.
+            let new_attrs = self.collect_attributes(defaults, attr_list.iter().copied())?;
+            let current_range = last_index..index;
+            if !current_range.is_empty() {
+                result.add_span(current_range, new_attrs);
+            }
+
+            for end in ends {
+                match end {
+                    RangeEnd::Start(index) => {
+                        // Add the attribute.
+                        attr_list.push(*index);
+                    }
+                    RangeEnd::End(index) => {
+                        // Remove the attribute.
+                        attr_list.retain(|&i| i != *index);
+                    }
+                }
+            }
+
+            last_index = index;
+        }
+
+        Ok(result)
     }
 }
 
