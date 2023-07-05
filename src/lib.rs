@@ -571,8 +571,6 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             ..
         } = self;
 
-        println!("{:#?}", &range_attributes);
-
         // If an error occurred, return it.
         if let Some(error) = error {
             return Err(error);
