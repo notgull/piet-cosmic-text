@@ -2,6 +2,10 @@
 
 This changelog describes changes that have occurred in `piet-cosmic-text` across versions.
 
+## Version 0.2.3
+
+- Remove accidental `println!`
+
 ## Version 0.2.2
 
 - Rework DPI support.
