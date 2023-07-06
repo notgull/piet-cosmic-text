@@ -79,7 +79,6 @@ impl LineProcessor {
                 color: match glyph.color_opt {
                     Some(color) => {
                         let [r, g, b, a] = [color.r(), color.g(), color.b(), color.a()];
-
                         line_straddler::Color::rgba(r, g, b, a)
                     }
 

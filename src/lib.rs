@@ -996,13 +996,31 @@ impl Attributes {
         let mut result = AttrsList::new(defaults);
 
         // Get the ranges within the range.
-        let ranges = self.ends.iter().filter_map(|(&index, ends)| {
-            if index >= range.end {
-                return None;
+        let mut ranges = self.ends.iter().filter(|(&index, _)| index < range.end);
+
+        // Collect all text attributes before the start.
+        for (&index, ends) in ranges.by_ref() {
+            if index >= range.start {
+                break;
             }
 
-            index.checked_sub(range.start).map(|index| (index, ends))
-        });
+            // Collect the attributes.
+            for end in ends {
+                match end {
+                    RangeEnd::Start(index) => {
+                        // Add the attribute.
+                        attr_list.push(*index);
+                    }
+                    RangeEnd::End(index) => {
+                        // Remove the attribute.
+                        attr_list.retain(|&i| i != *index);
+                    }
+                }
+            }
+        }
+
+        // Adjust the start index.
+        let ranges = ranges.map(|(index, ends)| (index - range.start, ends));
 
         // Iterate over the ranges.
         for (index, ends) in ranges {
@@ -1027,6 +1045,13 @@ impl Attributes {
             }
 
             last_index = index;
+        }
+
+        // Emit the final span.
+        let new_attrs = self.collect_attributes(defaults, attr_list.into_iter())?;
+        let current_range = last_index..range.end;
+        if !current_range.is_empty() {
+            result.add_span(current_range, new_attrs);
         }
 
         Ok(result)

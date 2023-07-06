@@ -24,7 +24,7 @@
 use cosmic_text::SwashCache;
 
 use piet::{FontFamily, Text as _, TextLayoutBuilder as _};
-use piet_cosmic_text::Text;
+use piet_cosmic_text::{LineProcessor, Text};
 
 use winit::{
     dpi::LogicalSize,
@@ -78,11 +78,13 @@ fn main() {
                 if text.is_loaded() {
                     // Calculate text layout.
                     let text_layout = text
-                        .new_text_layout("Line #1\nLine #2\nمرحبا بالعالم\n💀 💀 💀\nThis is an exceptionally long line! foobar foobar foobar foobar")
+                        .new_text_layout("Line #1\nLine #2\nLine #3\nمرحبا بالعالم\n💀 💀 💀\nThis is an exceptionally long line! foobar foobar foobar foobar")
                         .font(FontFamily::SANS_SERIF, 24.0)
                         .max_width(width as _)
+                        .range_attribute(..10, piet::TextAttribute::Underline(true))
                         .build()
                         .unwrap();
+                    let mut lines = LineProcessor::new();
 
                     // Draw pixels.
                     text.with_font_system_mut(|font_system| {
@@ -114,6 +116,49 @@ fn main() {
                                     *pixel = rgba;
                                 }
                             },
+                        );
+                    });
+
+                    // Draw lines.
+                    text_layout.layout_runs().flat_map(|run| {
+                        let line_y = run.line_y;
+                        run.glyphs.iter().map(move |glyph| (glyph, line_y))
+                    }).for_each(|(glyph, line_y)| {
+                        let offset = f32::from_bits(glyph.cache_key.font_size_bits) * 0.1;
+                        lines.handle_glyph(
+                            glyph,
+                            line_y + offset,
+                            cosmic_text::Color::rgba(0, 0, 0, 0xFF),
+                            false
+                        );
+                    });
+
+                    lines.lines().into_iter().for_each(|line| {
+                        let path = {
+                            let mut builder = tiny_skia::PathBuilder::new();
+                            builder.move_to(line.p0.x as f32, line.p0.y as f32);
+                            builder.line_to(line.p1.x as f32, line.p1.y as f32);
+                            builder.close();
+                            builder.finish().unwrap()
+                        };
+
+                        let mut pixmap = tiny_skia::PixmapMut::from_bytes(
+                            bytemuck::cast_slice_mut(&mut buffer),
+                            width as u32,
+                            height as u32,
+                        ).unwrap();
+                        pixmap.stroke_path(
+                            &path,
+                            &tiny_skia::Paint {
+                                shader: tiny_skia::Shader::SolidColor(tiny_skia::Color::from_rgba8(0, 0, 0, 0xFF)),
+                                ..Default::default()
+                            },
+                            &tiny_skia::Stroke {
+                                width: 3.0,
+                                ..Default::default()
+                            },
+                            tiny_skia::Transform::identity(),
+                            None
                         );
                     });
                 } else {
