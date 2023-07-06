@@ -32,7 +32,7 @@ use line_straddler::{Glyph, GlyphStyle, Line, LineGenerator, LineType};
 ///
 /// [`line-straddler`]: https://crates.io/crates/line-straddler
 #[derive(Debug)]
-pub struct TextProcessingState {
+pub struct LineProcessor {
     /// State for the underline.
     underline: LineGenerator,
 
@@ -43,13 +43,13 @@ pub struct TextProcessingState {
     lines: Vec<piet::kurbo::Line>,
 }
 
-impl Default for TextProcessingState {
+impl Default for LineProcessor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl TextProcessingState {
+impl LineProcessor {
     /// Create a new, empty state.
     pub fn new() -> Self {
         Self {

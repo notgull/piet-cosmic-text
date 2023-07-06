@@ -49,9 +49,9 @@
 pub use cosmic_text;
 pub use piet;
 
+mod channel;
 mod lines;
 
-use async_channel::Receiver;
 use event_listener::Event;
 
 use cosmic_text::fontdb::Family;
@@ -70,7 +70,7 @@ use std::rc::Rc;
 const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
 
-pub use lines::TextProcessingState;
+pub use lines::LineProcessor;
 
 /// The metadata stored in the font's stylings.
 ///
@@ -248,7 +248,7 @@ enum DelayedFontSystem {
     Real(FontSystem),
 
     /// We are waiting for a font system to be loaded.
-    Waiting(Receiver<FontSystem>),
+    Waiting(channel::Receiver<FontSystem>),
 }
 
 impl fmt::Debug for DelayedFontSystem {
@@ -267,19 +267,12 @@ impl fmt::Debug for DelayedFontSystem {
 impl DelayedFontSystem {
     /// Get the font system.
     fn get(&mut self) -> Option<&mut FontSystem> {
-        match self {
-            Self::Real(font_system) => Some(font_system),
-            Self::Waiting(channel) => {
-                // Try to wait on the channel without blocking.
-                match channel.try_recv() {
-                    Ok(font_system) => {
-                        *self = Self::Real(font_system);
-                        self.get()
-                    }
-
-                    Err(async_channel::TryRecvError::Closed) => panic!("font system was dropped"),
-
-                    Err(async_channel::TryRecvError::Empty) => None,
+        loop {
+            match self {
+                Self::Real(font_system) => return Some(font_system),
+                Self::Waiting(channel) => {
+                    // Try to wait on the channel without blocking.
+                    *self = Self::Real(channel.try_recv()?);
                 }
             }
         }
@@ -290,12 +283,7 @@ impl DelayedFontSystem {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
-                Self::Waiting(recv) => match recv.recv().await {
-                    Ok(font_system) => {
-                        *self = Self::Real(font_system);
-                    }
-                    Err(_) => panic!("font system was dropped"),
-                },
+                Self::Waiting(recv) => *self = Self::Real(recv.recv().await),
             }
         }
     }
@@ -305,12 +293,7 @@ impl DelayedFontSystem {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
-                Self::Waiting(recv) => match recv.recv_blocking() {
-                    Ok(font_system) => {
-                        *self = Self::Real(font_system);
-                    }
-                    Err(_) => panic!("font system was dropped"),
-                },
+                Self::Waiting(recv) => *self = Self::Real(recv.recv_blocking()),
             }
         }
     }
@@ -332,11 +315,11 @@ impl Text {
 
     /// Create a new `Text` renderer with the given thread to push work to.
     pub fn with_thread(thread: impl ExportWork) -> Self {
-        let (send, recv) = async_channel::bounded(1);
+        let (send, recv) = channel::channel();
 
         thread.run(move || {
             let fs = FontSystem::new();
-            send.try_send(fs).ok();
+            send.send(fs);
         });
 
         Self(Rc::new(Inner {
@@ -648,6 +631,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             let font_system = match font_system.get() {
                 Some(font_system) => font_system,
                 None => {
+                    #[cfg(feature = "tracing")]
                     tracing::warn!("Still waiting for font system to be loaded, returning error");
                     return Err(Error::BackendError(
                         "Still waiting for font system to be loaded".into(),
