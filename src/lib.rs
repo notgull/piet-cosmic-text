@@ -72,11 +72,48 @@ const POINTS_PER_INCH: f64 = 72.0;
 
 pub use lines::LineProcessor;
 
+#[cfg(feature = "tracing")]
+use tracing::{trace, trace_span, warn};
+
+#[cfg(not(feature = "tracing"))]
+macro_rules! warn {
+    ($($tt:tt)*) => {};
+}
+
+#[cfg(not(feature = "tracing"))]
+macro_rules! trace {
+    ($($tt:tt)*) => {};
+}
+
+#[cfg(not(feature = "tracing"))]
+macro_rules! trace_span {
+    ($($tt:tt)*) => {
+        Span
+    };
+}
+
+#[cfg(not(feature = "tracing"))]
+struct Span;
+
+#[cfg(not(feature = "tracing"))]
+impl Span {
+    fn enter(self) {}
+}
+
 /// The metadata stored in the font's stylings.
 ///
 /// This should be considered by the renderer in order to render extra decorations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Metadata(usize);
+
+impl fmt::Debug for Metadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Metadata")
+            .field("underline", &self.underline())
+            .field("strikethrough", &self.strikethrough())
+            .finish()
+    }
+}
 
 const UNDERLINE: usize = 1 << 0;
 const STRIKETHROUGH: usize = 1 << 1;
@@ -631,8 +668,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             let font_system = match font_system.get() {
                 Some(font_system) => font_system,
                 None => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!("Still waiting for font system to be loaded, returning error");
+                    warn!("Still waiting for font system to be loaded, returning error");
                     return Err(Error::BackendError(
                         "Still waiting for font system to be loaded".into(),
                     ));
@@ -991,33 +1027,39 @@ impl Attributes {
         range: Range<usize>,
         defaults: Attrs<'a>,
     ) -> Result<AttrsList, Error> {
+        let span = trace_span!("text_attributes", start = range.start, end = range.end);
+        let _guard = span.enter();
+
         let mut last_index = 0;
         let mut attr_list = vec![];
         let mut result = AttrsList::new(defaults);
 
         // Get the ranges within the range.
-        let mut ranges = self.ends.iter().filter(|(&index, _)| index < range.end);
+        let mut ranges = self
+            .ends
+            .iter()
+            .filter(|(&index, _)| index < range.end)
+            .peekable();
 
-        // Collect all text attributes before the start.
-        for (&index, ends) in ranges.by_ref() {
-            if index >= range.start {
-                break;
-            }
-
+        while let Some((_, ends)) = ranges.next_if(|(&index, _)| index < range.start) {
             // Collect the attributes.
             for end in ends {
                 match end {
                     RangeEnd::Start(index) => {
                         // Add the attribute.
+                        trace!("adding pre-attribute {}", index);
                         attr_list.push(*index);
                     }
                     RangeEnd::End(index) => {
                         // Remove the attribute.
+                        trace!("removing pre-attribute {}", index);
                         attr_list.retain(|&i| i != *index);
                     }
                 }
             }
         }
+
+        trace!("end of pre-attributes");
 
         // Adjust the start index.
         let ranges = ranges.map(|(index, ends)| (index - range.start, ends));
@@ -1025,20 +1067,26 @@ impl Attributes {
         // Iterate over the ranges.
         for (index, ends) in ranges {
             // Collect the attributes.
-            let new_attrs = self.collect_attributes(defaults, attr_list.iter().copied())?;
             let current_range = last_index..index;
             if !current_range.is_empty() {
+                let new_attrs = self.collect_attributes(defaults, attr_list.iter().copied())?;
+                let has_underline = new_attrs.metadata & UNDERLINE != 0;
+                trace!(has_underline, "adding span {:?}", current_range);
                 result.add_span(current_range, new_attrs);
+            } else {
+                trace!("skipping empty span {:?}", current_range);
             }
 
             for end in ends {
                 match end {
                     RangeEnd::Start(index) => {
                         // Add the attribute.
+                        trace!("adding attribute {}", index);
                         attr_list.push(*index);
                     }
                     RangeEnd::End(index) => {
                         // Remove the attribute.
+                        trace!("removing attribute {}", index);
                         attr_list.retain(|&i| i != *index);
                     }
                 }
@@ -1048,10 +1096,14 @@ impl Attributes {
         }
 
         // Emit the final span.
-        let new_attrs = self.collect_attributes(defaults, attr_list.into_iter())?;
         let current_range = last_index..range.end;
         if !current_range.is_empty() {
+            let new_attrs = self.collect_attributes(defaults, attr_list.into_iter())?;
+            let has_underline = new_attrs.metadata & UNDERLINE != 0;
+            trace!(has_underline, "adding final span {:?}", current_range);
             result.add_span(current_range, new_attrs);
+        } else {
+            trace!("skipping empty final span {:?}", current_range);
         }
 
         Ok(result)

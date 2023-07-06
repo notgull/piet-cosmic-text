@@ -43,6 +43,7 @@ bytemuck = "1.13.1"
 cosmic-text = { version = "0.8.0", features = ["swash"] }
 softbuffer = { version = "0.2.0", default-features = false, features = ["x11"] }
 tiny-skia = { version = "0.11.1", default-features = false, features = ["std"] }
+tracing-subscriber = "0.3.17"
 winit = { version = "0.28.1", default-features = false, features = ["x11"] }
 
 [features]

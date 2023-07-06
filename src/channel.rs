@@ -20,6 +20,8 @@
 // Public License along with `piet-cosmic-text`. If not, see <https://www.gnu.org/licenses/>.
 
 //! Tiny oneshot channel.
+//!
+//! Using this means we don't have to take a dependency on `async-channel`.
 
 use event_listener::Event;
 

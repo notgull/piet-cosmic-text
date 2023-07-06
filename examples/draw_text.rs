@@ -35,6 +35,8 @@ use winit::{
 };
 
 fn main() {
+    tracing_subscriber::fmt::init();
+
     let mut width = 720;
     let mut height = 480;
 
@@ -124,7 +126,10 @@ fn main() {
                         let line_y = run.line_y;
                         run.glyphs.iter().map(move |glyph| (glyph, line_y))
                     }).for_each(|(glyph, line_y)| {
-                        let offset = f32::from_bits(glyph.cache_key.font_size_bits) * 0.1;
+                        let meta = piet_cosmic_text::Metadata::from_raw(glyph.metadata);
+                        tracing::trace!("Glyph metadata: {:?}", meta);
+
+                        let offset = f32::from_bits(glyph.cache_key.font_size_bits) * -0.9;
                         lines.handle_glyph(
                             glyph,
                             line_y + offset,
@@ -134,6 +139,8 @@ fn main() {
                     });
 
                     lines.lines().into_iter().for_each(|line| {
+                        tracing::trace!("Got line: {:?}", line);
+
                         let path = {
                             let mut builder = tiny_skia::PathBuilder::new();
                             builder.move_to(line.p0.x as f32, line.p0.y as f32);

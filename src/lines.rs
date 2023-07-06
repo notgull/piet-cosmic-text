@@ -89,6 +89,7 @@ impl LineProcessor {
                 },
             },
         };
+
         let Self {
             underline,
             strikethrough,
