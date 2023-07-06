@@ -29,7 +29,7 @@ use piet_cosmic_text::Text;
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop},
+    event_loop::EventLoop,
     platform::run_return::EventLoopExtRunReturn,
     window::WindowBuilder,
 };
@@ -53,13 +53,13 @@ fn main() {
     let mut swash_cache = SwashCache::new();
 
     event_loop.run_return(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
+        control_flow.set_wait();
 
         match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => *control_flow = ControlFlow::Exit,
+            } => control_flow.set_exit(),
 
             Event::WindowEvent {
                 event: WindowEvent::Resized(size),

@@ -45,6 +45,12 @@
 #![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
+// Public dependencies.
+pub use cosmic_text;
+pub use piet;
+
+mod lines;
+
 use async_channel::Receiver;
 use event_listener::Event;
 
@@ -63,6 +69,8 @@ use std::rc::Rc;
 
 const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
+
+pub use lines::TextProcessingState;
 
 /// The metadata stored in the font's stylings.
 ///
