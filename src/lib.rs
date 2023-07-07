@@ -54,8 +54,10 @@ mod lines;
 
 use event_listener::Event;
 
-use cosmic_text::fontdb::Family;
-use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
+use cosmic_text as ct;
+
+use ct::fontdb::Family;
+use ct::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
 use piet::kurbo::{Point, Rect, Size};
 use piet::{util, Error, FontFamily, FontWeight, TextAlignment, TextAttribute, TextStorage};
@@ -556,7 +558,7 @@ impl piet::Text for Text {
         let id = {
             let ids = db
                 .db_mut()
-                .load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(data.to_vec())));
+                .load_font_source(ct::fontdb::Source::Binary(Arc::new(data.to_vec())));
 
             // For simplicity, just take the first ID if this is a font collection.
             match ids.len() {
@@ -631,9 +633,9 @@ impl fmt::Debug for TextLayoutBuilder {
 }
 
 impl TextLayoutBuilder {
-    fn shaping(&self) -> cosmic_text::Shaping {
+    fn shaping(&self) -> ct::Shaping {
         // TODO: Use a better strategy to find this!
-        cosmic_text::Shaping::Advanced
+        ct::Shaping::Advanced
     }
 }
 
@@ -723,7 +725,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         let mut buffer_lines = handle.0.buffer.take();
         let mut offset = 0;
 
-        for line in string.lines() {
+        for line in ct::BidiParagraphs::new(&string) {
             let start = offset;
             let end = start + line.len() + 1;
 
@@ -732,10 +734,10 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 
             let mut line = BufferLine::new(line, attrs_list, shaping);
             line.set_align(self.alignment.map(|a| match a {
-                TextAlignment::Start => cosmic_text::Align::Left,
-                TextAlignment::Center => cosmic_text::Align::Center,
-                TextAlignment::End => cosmic_text::Align::Right,
-                TextAlignment::Justified => cosmic_text::Align::Justified,
+                TextAlignment::Start => ct::Align::Left,
+                TextAlignment::Center => ct::Align::Center,
+                TextAlignment::End => ct::Align::Right,
+                TextAlignment::Justified => ct::Align::Justified,
             }));
 
             buffer_lines.push(line);
@@ -753,7 +755,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
                 None => {
                     warn!("Still waiting for font system to be loaded, returning error");
                     return Err(Error::BackendError(
-                        "Still waiting for font system to be loaded".into(),
+                        FontError::NotLoaded.into()
                     ));
                 }
             };
@@ -762,7 +764,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
 
             buffer.lines = buffer_lines;
             buffer.set_size(font_system, max_width as f32, f32::INFINITY);
-            buffer.set_wrap(font_system, cosmic_text::Wrap::Word);
+            buffer.set_wrap(font_system, ct::Wrap::Word);
 
             // Shape the buffer.
             buffer.shape_until_scroll(font_system);
@@ -1204,16 +1206,16 @@ impl Attributes {
     }
 }
 
-fn cvt_color(p: piet::Color) -> cosmic_text::Color {
+fn cvt_color(p: piet::Color) -> ct::Color {
     let (r, g, b, a) = p.as_rgba8();
-    cosmic_text::Color::rgba(r, g, b, a)
+    ct::Color::rgba(r, g, b, a)
 }
 
-fn cvt_family(p: &piet::FontFamily) -> cosmic_text::Family<'_> {
+fn cvt_family(p: &piet::FontFamily) -> ct::Family<'_> {
     macro_rules! generic {
         ($piet:ident => $cosmic:ident) => {
             if p == &piet::FontFamily::$piet {
-                return cosmic_text::Family::$cosmic;
+                return ct::Family::$cosmic;
             }
         };
     }
@@ -1224,18 +1226,18 @@ fn cvt_family(p: &piet::FontFamily) -> cosmic_text::Family<'_> {
         generic!(MONOSPACE => Monospace);
     }
 
-    cosmic_text::Family::Name(p.name())
+    ct::Family::Name(p.name())
 }
 
-fn cvt_style(p: piet::FontStyle) -> cosmic_text::Style {
+fn cvt_style(p: piet::FontStyle) -> ct::Style {
     use piet::FontStyle;
 
     match p {
-        FontStyle::Italic => cosmic_text::Style::Italic,
-        FontStyle::Regular => cosmic_text::Style::Normal,
+        FontStyle::Italic => ct::Style::Italic,
+        FontStyle::Regular => ct::Style::Normal,
     }
 }
 
-fn cvt_weight(p: piet::FontWeight) -> cosmic_text::Weight {
-    cosmic_text::Weight(p.to_raw())
+fn cvt_weight(p: piet::FontWeight) -> ct::Weight {
+    ct::Weight(p.to_raw())
 }
