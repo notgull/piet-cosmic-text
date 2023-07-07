@@ -22,7 +22,7 @@
 //! Example harness for displaying a text layout.
 
 use cosmic_text::SwashCache;
-use piet::{TextLayout as _, kurbo::Vec2};
+use piet::{kurbo::Vec2, TextLayout as _};
 use piet_cosmic_text::{LineProcessor, Text, TextLayout};
 use winit::{
     dpi::LogicalSize,
@@ -108,7 +108,10 @@ pub(super) fn run(mut f: impl FnMut(&mut Text, usize, usize) -> TextLayout + 'st
 
                                 pixmap.fill_rect(
                                     tiny_skia::Rect::from_xywh(
-                                        x as f32 + offset.x as f32, y as f32 + offset.y as f32, w as f32, h as f32,
+                                        x as f32 + offset.x as f32,
+                                        y as f32 + offset.y as f32,
+                                        w as f32,
+                                        h as f32,
                                     )
                                     .unwrap(),
                                     &tiny_skia::Paint {
