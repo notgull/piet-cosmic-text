@@ -105,7 +105,7 @@ impl LineProcessor {
     pub fn handle_glyph(&mut self, glyph: &LayoutGlyph, line_y: f32, color: cosmic_text::Color) {
         // Get the metadata.
         let metadata = Metadata::from_raw(glyph.metadata);
-        let font_size = f32::from_bits(glyph.cache_key.font_size_bits);
+        let font_size = glyph.font_size;
         let glyph = Glyph {
             line_y,
             font_size,
