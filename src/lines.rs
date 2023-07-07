@@ -51,9 +51,10 @@ pub struct StyledLine {
 impl StyledLine {
     /// Represent this styled line as a rectangle.
     pub fn into_rect(self) -> Rect {
-        const FONT_WEIGHT_MULTIPLIER: f32 = 0.1;
+        const FONT_WEIGHT_MULTIPLIER: f32 = 0.05;
+        const OFFSET_MULTIPLIER: f32 = -0.83;
 
-        let offset = self.font_size * -0.9;
+        let offset = self.font_size * OFFSET_MULTIPLIER;
         let width = self.font_size
             * (self.bold.to_raw() as f32 / FontWeight::NORMAL.to_raw() as f32)
             * FONT_WEIGHT_MULTIPLIER;
@@ -61,7 +62,7 @@ impl StyledLine {
         let mut p0 = self.line.p0;
         let mut p1 = self.line.p1;
         p0.y += f64::from(offset);
-        p1.y = p0.y + f64::from(width);
+        p1.y = p0.y - f64::from(width);
         Rect::from_points(p0, p1)
     }
 }
