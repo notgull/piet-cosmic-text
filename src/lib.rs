@@ -566,6 +566,13 @@ impl fmt::Debug for TextLayoutBuilder {
     }
 }
 
+impl TextLayoutBuilder {
+    fn shaping(&self) -> cosmic_text::Shaping {
+        // TODO: Use a better strategy to find this!
+        cosmic_text::Shaping::Advanced
+    }
+}
+
 impl piet::TextLayoutBuilder for TextLayoutBuilder {
     type Out = TextLayout;
 
@@ -604,6 +611,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
     }
 
     fn build(self) -> Result<Self::Out, Error> {
+        let shaping = self.shaping();
         let Self {
             handle,
             string,
@@ -658,7 +666,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             // Get the attributes for this line.
             let attrs_list = range_attributes.text_attributes(start..end, default_attrs)?;
 
-            let mut line = BufferLine::new(line, attrs_list);
+            let mut line = BufferLine::new(line, attrs_list, shaping);
             line.set_align(self.alignment.map(|a| match a {
                 TextAlignment::Start => cosmic_text::Align::Left,
                 TextAlignment::Center => cosmic_text::Align::Center,
@@ -779,7 +787,7 @@ impl piet::TextLayout for TextLayout {
                 let max_glyph_size = run
                     .glyphs
                     .iter()
-                    .map(|glyph| f32::from_bits(glyph.cache_key.font_size_bits) as i32)
+                    .map(|glyph| glyph.font_size as i32)
                     .max()
                     .unwrap_or(self.text_buffer.glyph_size);
 
@@ -867,9 +875,10 @@ impl piet::TextLayout for TextLayout {
                     line,
                     {
                         // Get the point.
-                        let x = glyph.x_int as f64;
+                        let physical = glyph.physical((0.0, 0.0), 1.0);
+                        let x = physical.x as f64;
                         let y = run.line_y as f64
-                            + glyph.y_int as f64
+                            + physical.y as f64
                             + self.text_buffer.glyph_size as f64;
 
                         Point::new(x, y)
