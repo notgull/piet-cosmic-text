@@ -45,14 +45,20 @@
 #![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
 
-use async_channel::Receiver;
+// Public dependencies.
+pub use cosmic_text;
+pub use piet;
+
+mod channel;
+mod lines;
+
 use event_listener::Event;
 
 use cosmic_text::fontdb::Family;
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
 use piet::kurbo::{Point, Rect, Size};
-use piet::{util, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
+use piet::{util, Error, FontFamily, FontWeight, TextAlignment, TextAttribute, TextStorage};
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::cmp;
@@ -64,19 +70,61 @@ use std::rc::Rc;
 const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
 
+pub use lines::{LineProcessor, StyledLine};
+
+#[cfg(feature = "tracing")]
+use tracing::{trace, trace_span, warn};
+
+#[cfg(not(feature = "tracing"))]
+macro_rules! warn {
+    ($($tt:tt)*) => {};
+}
+
+#[cfg(not(feature = "tracing"))]
+macro_rules! trace {
+    ($($tt:tt)*) => {};
+}
+
+#[cfg(not(feature = "tracing"))]
+macro_rules! trace_span {
+    ($($tt:tt)*) => {
+        Span
+    };
+}
+
+#[cfg(not(feature = "tracing"))]
+struct Span;
+
+#[cfg(not(feature = "tracing"))]
+impl Span {
+    fn enter(self) {}
+}
+
 /// The metadata stored in the font's stylings.
 ///
 /// This should be considered by the renderer in order to render extra decorations.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Metadata(usize);
 
-const UNDERLINE: usize = 1 << 0;
-const STRIKETHROUGH: usize = 1 << 1;
+impl fmt::Debug for Metadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Metadata")
+            .field("underline", &self.underline())
+            .field("strikethrough", &self.strikethrough())
+            .field("boldness", &self.boldness())
+            .finish()
+    }
+}
+
+const FONT_WEIGHT_SIZE: usize = 10;
+const FONT_WEIGHT_MASK: usize = 0b1111111111;
+const UNDERLINE: usize = 1 << FONT_WEIGHT_SIZE;
+const STRIKETHROUGH: usize = 1 << (FONT_WEIGHT_SIZE + 1);
 
 impl Metadata {
     /// Create a new, empty metadata.
     pub fn new() -> Self {
-        Self(0)
+        Self(FontWeight::NORMAL.to_raw().into())
     }
 
     /// Create a metadata from the raw value.
@@ -107,6 +155,12 @@ impl Metadata {
         }
     }
 
+    /// Set the boldness of the font.
+    pub fn set_boldness(&mut self, boldness: FontWeight) {
+        self.0 &= !FONT_WEIGHT_MASK;
+        self.0 |= usize::from(boldness.to_raw());
+    }
+
     /// Is the "underline" bit set?
     pub fn underline(&self) -> bool {
         self.0 & UNDERLINE != 0
@@ -115,6 +169,11 @@ impl Metadata {
     /// Is the "strikethrough" bit set?
     pub fn strikethrough(&self) -> bool {
         self.0 & STRIKETHROUGH != 0
+    }
+
+    /// Get the boldness of the font.
+    pub fn boldness(&self) -> FontWeight {
+        FontWeight::new((self.0 & FONT_WEIGHT_MASK) as u16)
     }
 }
 
@@ -240,7 +299,7 @@ enum DelayedFontSystem {
     Real(FontSystem),
 
     /// We are waiting for a font system to be loaded.
-    Waiting(Receiver<FontSystem>),
+    Waiting(channel::Receiver<FontSystem>),
 }
 
 impl fmt::Debug for DelayedFontSystem {
@@ -259,19 +318,12 @@ impl fmt::Debug for DelayedFontSystem {
 impl DelayedFontSystem {
     /// Get the font system.
     fn get(&mut self) -> Option<&mut FontSystem> {
-        match self {
-            Self::Real(font_system) => Some(font_system),
-            Self::Waiting(channel) => {
-                // Try to wait on the channel without blocking.
-                match channel.try_recv() {
-                    Ok(font_system) => {
-                        *self = Self::Real(font_system);
-                        self.get()
-                    }
-
-                    Err(async_channel::TryRecvError::Closed) => panic!("font system was dropped"),
-
-                    Err(async_channel::TryRecvError::Empty) => None,
+        loop {
+            match self {
+                Self::Real(font_system) => return Some(font_system),
+                Self::Waiting(channel) => {
+                    // Try to wait on the channel without blocking.
+                    *self = Self::Real(channel.try_recv()?);
                 }
             }
         }
@@ -282,12 +334,7 @@ impl DelayedFontSystem {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
-                Self::Waiting(recv) => match recv.recv().await {
-                    Ok(font_system) => {
-                        *self = Self::Real(font_system);
-                    }
-                    Err(_) => panic!("font system was dropped"),
-                },
+                Self::Waiting(recv) => *self = Self::Real(recv.recv().await),
             }
         }
     }
@@ -297,12 +344,7 @@ impl DelayedFontSystem {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
-                Self::Waiting(recv) => match recv.recv_blocking() {
-                    Ok(font_system) => {
-                        *self = Self::Real(font_system);
-                    }
-                    Err(_) => panic!("font system was dropped"),
-                },
+                Self::Waiting(recv) => *self = Self::Real(recv.recv_blocking()),
             }
         }
     }
@@ -324,11 +366,11 @@ impl Text {
 
     /// Create a new `Text` renderer with the given thread to push work to.
     pub fn with_thread(thread: impl ExportWork) -> Self {
-        let (send, recv) = async_channel::bounded(1);
+        let (send, recv) = channel::channel();
 
         thread.run(move || {
             let fs = FontSystem::new();
-            send.try_send(fs).ok();
+            send.send(fs);
         });
 
         Self(Rc::new(Inner {
@@ -470,11 +512,12 @@ impl piet::Text for Text {
 
     fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
         let text = Box::new(text);
+        let defaults = util::LayoutDefaults::default();
 
         TextLayoutBuilder {
             handle: self.clone(),
             string: text,
-            defaults: util::LayoutDefaults::default(),
+            defaults,
             range_attributes: Attributes::default(),
             last_range_start_pos: 0,
             max_width: f64::INFINITY,
@@ -587,13 +630,9 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         let default_attrs = {
             let mut metadata = Metadata::new();
 
-            if defaults.underline {
-                metadata.set_underline(true);
-            }
-
-            if defaults.strikethrough {
-                metadata.set_strikethrough(true);
-            }
+            metadata.set_underline(defaults.underline);
+            metadata.set_strikethrough(defaults.strikethrough);
+            metadata.set_boldness(defaults.weight);
 
             let mut attrs = Attrs::new()
                 .family(cvt_family(&defaults.font))
@@ -640,7 +679,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             let font_system = match font_system.get() {
                 Some(font_system) => font_system,
                 None => {
-                    tracing::warn!("Still waiting for font system to be loaded, returning error");
+                    warn!("Still waiting for font system to be loaded, returning error");
                     return Err(Error::BackendError(
                         "Still waiting for font system to be loaded".into(),
                     ));
@@ -950,6 +989,19 @@ impl Attributes {
         mut attrs: Attrs<'a>,
         indices: impl Iterator<Item = usize>,
     ) -> Result<Attrs<'a>, Error> {
+        macro_rules! with_metadata {
+            ($closure:expr) => {{
+                #[inline]
+                fn closure_slot(metadata: &mut Metadata, closure: impl FnOnce(&mut Metadata)) {
+                    closure(metadata);
+                }
+
+                let mut metadata = Metadata::from_raw(attrs.metadata);
+                closure_slot(&mut metadata, $closure);
+                attrs.metadata = metadata.into_raw();
+            }};
+        }
+
         for index in indices {
             let piet_attr = self
                 .attributes
@@ -962,23 +1014,18 @@ impl Attributes {
                 TextAttribute::FontSize(_) => {
                     return Err(Error::Unimplemented);
                 }
-                TextAttribute::Strikethrough(true) => {
-                    attrs.metadata |= STRIKETHROUGH;
+                TextAttribute::Strikethrough(st) => {
+                    with_metadata!(|meta| meta.set_strikethrough(*st));
                 }
-                TextAttribute::Strikethrough(false) => {
-                    attrs.metadata &= !STRIKETHROUGH;
-                }
-                TextAttribute::Underline(true) => {
-                    attrs.metadata |= UNDERLINE;
-                }
-                TextAttribute::Underline(false) => {
-                    attrs.metadata &= !UNDERLINE;
+                TextAttribute::Underline(ul) => {
+                    with_metadata!(|meta| meta.set_underline(*ul));
                 }
                 TextAttribute::Style(style) => {
                     attrs.style = cvt_style(*style);
                 }
                 TextAttribute::Weight(weight) => {
                     attrs.weight = cvt_weight(*weight);
+                    with_metadata!(|meta| meta.set_boldness(*weight));
                 }
                 TextAttribute::TextColor(color) => {
                     if *color != util::DEFAULT_TEXT_COLOR {
@@ -999,42 +1046,81 @@ impl Attributes {
         range: Range<usize>,
         defaults: Attrs<'a>,
     ) -> Result<AttrsList, Error> {
+        let span = trace_span!("text_attributes", start = range.start, end = range.end);
+        let _guard = span.enter();
+
         let mut last_index = 0;
         let mut attr_list = vec![];
         let mut result = AttrsList::new(defaults);
 
         // Get the ranges within the range.
-        let ranges = self.ends.iter().filter_map(|(&index, ends)| {
-            if index >= range.end {
-                return None;
-            }
+        let mut ranges = self
+            .ends
+            .iter()
+            .filter(|(&index, _)| index < range.end)
+            .peekable();
 
-            index.checked_sub(range.start).map(|index| (index, ends))
-        });
+        while let Some((_, ends)) = ranges.next_if(|(&index, _)| index < range.start) {
+            // Collect the attributes.
+            for end in ends {
+                match end {
+                    RangeEnd::Start(index) => {
+                        // Add the attribute.
+                        trace!("adding pre-attribute {}", index);
+                        attr_list.push(*index);
+                    }
+                    RangeEnd::End(index) => {
+                        // Remove the attribute.
+                        trace!("removing pre-attribute {}", index);
+                        attr_list.retain(|&i| i != *index);
+                    }
+                }
+            }
+        }
+
+        trace!("end of pre-attributes");
+
+        // Adjust the start index.
+        let ranges = ranges.map(|(index, ends)| (index - range.start, ends));
 
         // Iterate over the ranges.
         for (index, ends) in ranges {
             // Collect the attributes.
-            let new_attrs = self.collect_attributes(defaults, attr_list.iter().copied())?;
             let current_range = last_index..index;
             if !current_range.is_empty() {
+                let new_attrs = self.collect_attributes(defaults, attr_list.iter().copied())?;
+                trace!("adding span {:?}", current_range);
                 result.add_span(current_range, new_attrs);
+            } else {
+                trace!("skipping empty span {:?}", current_range);
             }
 
             for end in ends {
                 match end {
                     RangeEnd::Start(index) => {
                         // Add the attribute.
+                        trace!("adding attribute {}", index);
                         attr_list.push(*index);
                     }
                     RangeEnd::End(index) => {
                         // Remove the attribute.
+                        trace!("removing attribute {}", index);
                         attr_list.retain(|&i| i != *index);
                     }
                 }
             }
 
             last_index = index;
+        }
+
+        // Emit the final span.
+        let current_range = last_index..range.end;
+        if !current_range.is_empty() {
+            let new_attrs = self.collect_attributes(defaults, attr_list.into_iter())?;
+            trace!("adding final span {:?}", current_range);
+            result.add_span(current_range, new_attrs);
+        } else {
+            trace!("skipping empty final span {:?}", current_range);
         }
 
         Ok(result)
