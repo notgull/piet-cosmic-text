@@ -58,7 +58,7 @@ use cosmic_text::fontdb::Family;
 use cosmic_text::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
 use piet::kurbo::{Point, Rect, Size};
-use piet::{util, Error, FontFamily, TextAlignment, TextAttribute, TextStorage};
+use piet::{util, Error, FontFamily, FontWeight, TextAlignment, TextAttribute, TextStorage};
 
 use std::cell::{Cell, RefCell, RefMut};
 use std::cmp;
@@ -111,17 +111,20 @@ impl fmt::Debug for Metadata {
         f.debug_struct("Metadata")
             .field("underline", &self.underline())
             .field("strikethrough", &self.strikethrough())
+            .field("boldness", &self.boldness())
             .finish()
     }
 }
 
-const UNDERLINE: usize = 1 << 0;
-const STRIKETHROUGH: usize = 1 << 1;
+const FONT_WEIGHT_SIZE: usize = 10;
+const FONT_WEIGHT_MASK: usize = 0b1111111111;
+const UNDERLINE: usize = 1 << FONT_WEIGHT_SIZE;
+const STRIKETHROUGH: usize = 1 << (FONT_WEIGHT_SIZE + 1);
 
 impl Metadata {
     /// Create a new, empty metadata.
     pub fn new() -> Self {
-        Self(0)
+        Self(FontWeight::NORMAL.to_raw().into())
     }
 
     /// Create a metadata from the raw value.
@@ -152,6 +155,12 @@ impl Metadata {
         }
     }
 
+    /// Set the boldness of the font.
+    pub fn set_boldness(&mut self, boldness: FontWeight) {
+        self.0 &= !FONT_WEIGHT_MASK;
+        self.0 |= usize::from(boldness.to_raw());
+    }
+
     /// Is the "underline" bit set?
     pub fn underline(&self) -> bool {
         self.0 & UNDERLINE != 0
@@ -160,6 +169,11 @@ impl Metadata {
     /// Is the "strikethrough" bit set?
     pub fn strikethrough(&self) -> bool {
         self.0 & STRIKETHROUGH != 0
+    }
+
+    /// Get the boldness of the font.
+    pub fn boldness(&self) -> FontWeight {
+        FontWeight::new((self.0 & FONT_WEIGHT_MASK) as u16)
     }
 }
 
@@ -498,11 +512,12 @@ impl piet::Text for Text {
 
     fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
         let text = Box::new(text);
+        let defaults = util::LayoutDefaults::default();
 
         TextLayoutBuilder {
             handle: self.clone(),
             string: text,
-            defaults: util::LayoutDefaults::default(),
+            defaults,
             range_attributes: Attributes::default(),
             last_range_start_pos: 0,
             max_width: f64::INFINITY,
@@ -615,13 +630,9 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         let default_attrs = {
             let mut metadata = Metadata::new();
 
-            if defaults.underline {
-                metadata.set_underline(true);
-            }
-
-            if defaults.strikethrough {
-                metadata.set_strikethrough(true);
-            }
+            metadata.set_underline(defaults.underline);
+            metadata.set_strikethrough(defaults.strikethrough);
+            metadata.set_boldness(defaults.weight);
 
             let mut attrs = Attrs::new()
                 .family(cvt_family(&defaults.font))
@@ -978,6 +989,19 @@ impl Attributes {
         mut attrs: Attrs<'a>,
         indices: impl Iterator<Item = usize>,
     ) -> Result<Attrs<'a>, Error> {
+        macro_rules! with_metadata {
+            ($closure:expr) => {{
+                #[inline]
+                fn closure_slot(metadata: &mut Metadata, closure: impl FnOnce(&mut Metadata)) {
+                    closure(metadata);
+                }
+
+                let mut metadata = Metadata::from_raw(attrs.metadata);
+                closure_slot(&mut metadata, $closure);
+                attrs.metadata = metadata.into_raw();
+            }};
+        }
+
         for index in indices {
             let piet_attr = self
                 .attributes
@@ -990,23 +1014,18 @@ impl Attributes {
                 TextAttribute::FontSize(_) => {
                     return Err(Error::Unimplemented);
                 }
-                TextAttribute::Strikethrough(true) => {
-                    attrs.metadata |= STRIKETHROUGH;
+                TextAttribute::Strikethrough(st) => {
+                    with_metadata!(|meta| meta.set_strikethrough(*st));
                 }
-                TextAttribute::Strikethrough(false) => {
-                    attrs.metadata &= !STRIKETHROUGH;
-                }
-                TextAttribute::Underline(true) => {
-                    attrs.metadata |= UNDERLINE;
-                }
-                TextAttribute::Underline(false) => {
-                    attrs.metadata &= !UNDERLINE;
+                TextAttribute::Underline(ul) => {
+                    with_metadata!(|meta| meta.set_underline(*ul));
                 }
                 TextAttribute::Style(style) => {
                     attrs.style = cvt_style(*style);
                 }
                 TextAttribute::Weight(weight) => {
                     attrs.weight = cvt_weight(*weight);
+                    with_metadata!(|meta| meta.set_boldness(*weight));
                 }
                 TextAttribute::TextColor(color) => {
                     if *color != util::DEFAULT_TEXT_COLOR {
@@ -1070,8 +1089,7 @@ impl Attributes {
             let current_range = last_index..index;
             if !current_range.is_empty() {
                 let new_attrs = self.collect_attributes(defaults, attr_list.iter().copied())?;
-                let has_underline = new_attrs.metadata & UNDERLINE != 0;
-                trace!(has_underline, "adding span {:?}", current_range);
+                trace!("adding span {:?}", current_range);
                 result.add_span(current_range, new_attrs);
             } else {
                 trace!("skipping empty span {:?}", current_range);
@@ -1099,8 +1117,7 @@ impl Attributes {
         let current_range = last_index..range.end;
         if !current_range.is_empty() {
             let new_attrs = self.collect_attributes(defaults, attr_list.into_iter())?;
-            let has_underline = new_attrs.metadata & UNDERLINE != 0;
-            trace!(has_underline, "adding final span {:?}", current_range);
+            trace!("adding final span {:?}", current_range);
             result.add_span(current_range, new_attrs);
         } else {
             trace!("skipping empty final span {:?}", current_range);

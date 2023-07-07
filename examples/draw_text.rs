@@ -126,43 +126,40 @@ fn main() {
                         let line_y = run.line_y;
                         run.glyphs.iter().map(move |glyph| (glyph, line_y))
                     }).for_each(|(glyph, line_y)| {
-                        let meta = piet_cosmic_text::Metadata::from_raw(glyph.metadata);
-                        tracing::trace!("Glyph metadata: {:?}", meta);
-
-                        let offset = f32::from_bits(glyph.cache_key.font_size_bits) * -0.9;
                         lines.handle_glyph(
                             glyph,
-                            line_y + offset,
+                            line_y,
                             cosmic_text::Color::rgba(0, 0, 0, 0xFF),
-                            false
                         );
                     });
 
                     lines.lines().into_iter().for_each(|line| {
                         tracing::trace!("Got line: {:?}", line);
 
-                        let path = {
-                            let mut builder = tiny_skia::PathBuilder::new();
-                            let line = line.line;
-                            builder.move_to(line.p0.x as f32, line.p0.y as f32);
-                            builder.line_to(line.p1.x as f32, line.p1.y as f32);
-                            builder.close();
-                            builder.finish().unwrap()
-                        };
-
                         let mut pixmap = tiny_skia::PixmapMut::from_bytes(
                             bytemuck::cast_slice_mut(&mut buffer),
                             width as u32,
                             height as u32,
                         ).unwrap();
-                        pixmap.stroke_path(
-                            &path,
+
+                        let rect = {
+                            let rect = line.into_rect();
+                            tiny_skia::Rect::from_ltrb(
+                                rect.x0 as f32,
+                                rect.y0 as f32,
+                                rect.x1 as f32,
+                                rect.y1 as f32,
+                            ).unwrap()
+                        };
+                        let color = {
+                            let (r, g, b, a) = line.color.as_rgba8();
+                            tiny_skia::Color::from_rgba8(r, g, b, a)
+                        };
+
+                        pixmap.fill_rect(
+                            rect,
                             &tiny_skia::Paint {
-                                shader: tiny_skia::Shader::SolidColor(tiny_skia::Color::from_rgba8(0, 0, 0, 0xFF)),
-                                ..Default::default()
-                            },
-                            &tiny_skia::Stroke {
-                                width: 3.0,
+                                shader: tiny_skia::Shader::SolidColor(color),
                                 ..Default::default()
                             },
                             tiny_skia::Transform::identity(),
