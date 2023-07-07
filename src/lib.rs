@@ -66,6 +66,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut, Range, RangeBounds};
 use std::rc::Rc;
+use std::sync::Arc;
 
 const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
@@ -73,7 +74,12 @@ const POINTS_PER_INCH: f64 = 72.0;
 pub use lines::{LineProcessor, StyledLine};
 
 #[cfg(feature = "tracing")]
-use tracing::{trace, trace_span, warn};
+use tracing::{error, trace, trace_span, warn, warn_span};
+
+#[cfg(not(feature = "tracing"))]
+macro_rules! error {
+    ($($tt:tt)*) => {};
+}
 
 #[cfg(not(feature = "tracing"))]
 macro_rules! warn {
@@ -93,12 +99,40 @@ macro_rules! trace_span {
 }
 
 #[cfg(not(feature = "tracing"))]
+macro_rules! warn_span {
+    ($($tt:tt)*) => {
+        Span
+    };
+}
+
+#[cfg(not(feature = "tracing"))]
 struct Span;
 
 #[cfg(not(feature = "tracing"))]
 impl Span {
     fn enter(self) {}
 }
+
+/// The error type for this library.
+#[derive(Debug)]
+pub(crate) enum FontError {
+    /// Attempted to mutably borrow the font system twice.
+    AlreadyBorrowed,
+
+    /// The font system is not loaded yet.
+    NotLoaded,
+}
+
+impl fmt::Display for FontError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyBorrowed => f.write_str("the FontSystem is already mutably borrowed and cannot be accessed"),
+            Self::NotLoaded => f.write_str("the FontSystem is not loaded yet, check is_loaded() before accessing or use wait_for_load()"),
+        }
+    }
+}
+
+impl std::error::Error for FontError {}
 
 /// The metadata stored in the font's stylings.
 ///
@@ -224,13 +258,15 @@ impl fmt::Debug for Text {
         }
 
         let mut ds = f.debug_struct("Text");
-        let font_db = self.0.font_db.try_borrow();
 
+        // Print out the font database if we can.
+        let font_db = self.0.font_db.try_borrow();
         let _ = match &font_db {
             Ok(font_db) => ds.field("font_db", font_db),
             Err(_) => ds.field("font_db", &Borrowed),
         };
 
+        // Finish with the DPI.
         ds.field("dpi", &self.0.dpi.get()).finish()
     }
 }
@@ -504,10 +540,38 @@ impl piet::Text for Text {
         font
     }
 
-    fn load_font(&mut self, _data: &[u8]) -> Result<FontFamily, Error> {
-        // TODO: Once cosmic-text uses font-db version 0.14, we can load fonts from data reliably.
-        // For now, we can't do this yet.
-        Err(Error::NotSupported)
+    fn load_font(&mut self, data: &[u8]) -> Result<FontFamily, Error> {
+        let span = warn_span!("load_font", data_len = data.len());
+        let _enter = span.enter();
+
+        let mut db_guard = self
+            .0
+            .borrow_font_system()
+            .ok_or_else(|| Error::BackendError(FontError::AlreadyBorrowed.into()))?;
+        let db = db_guard
+            .get()
+            .ok_or_else(|| Error::BackendError(FontError::NotLoaded.into()))?;
+
+        // Insert the data source into the underlying font database.
+        let id = {
+            let ids = db
+                .db_mut()
+                .load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(data.to_vec())));
+
+            // For simplicity, just take the first ID if this is a font collection.
+            match ids.len() {
+                0 => return Err(Error::FontLoadingFailed),
+                1 => ids[0],
+                _len => {
+                    warn!("received font collection of length {_len}, only selecting first font");
+                    ids[0]
+                }
+            }
+        };
+
+        // Get the font back.
+        let font = db.db().face(id).ok_or_else(|| Error::FontLoadingFailed)?;
+        Ok(FontFamily::new_unchecked(font.families[0].0.as_str()))
     }
 
     fn new_text_layout(&mut self, text: impl TextStorage) -> Self::TextLayoutBuilder {
@@ -1000,6 +1064,7 @@ impl Attributes {
     ) -> Result<Attrs<'a>, Error> {
         macro_rules! with_metadata {
             ($closure:expr) => {{
+                // Necessary to tell the compiler about typing info.
                 #[inline]
                 fn closure_slot(metadata: &mut Metadata, closure: impl FnOnce(&mut Metadata)) {
                     closure(metadata);
@@ -1021,6 +1086,9 @@ impl Attributes {
                     attrs.family = cvt_family(family);
                 }
                 TextAttribute::FontSize(_) => {
+                    // TODO: cosmic-text does not support variable sized text yet.
+                    // https://github.com/pop-os/cosmic-text/issues/64
+                    error!("cosmic-text does not support variable size fonts yet");
                     return Err(Error::Unimplemented);
                 }
                 TextAttribute::Strikethrough(st) => {
