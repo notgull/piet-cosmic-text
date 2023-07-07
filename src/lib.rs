@@ -70,7 +70,7 @@ use std::rc::Rc;
 const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
 
-pub use lines::LineProcessor;
+pub use lines::{LineProcessor, StyledLine};
 
 #[cfg(feature = "tracing")]
 use tracing::{trace, trace_span, warn};

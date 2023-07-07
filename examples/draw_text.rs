@@ -83,7 +83,7 @@ fn main() {
                         .new_text_layout("Line #1\nLine #2\nLine #3\nمرحبا بالعالم\n💀 💀 💀\nThis is an exceptionally long line! foobar foobar foobar foobar")
                         .font(FontFamily::SANS_SERIF, 24.0)
                         .max_width(width as _)
-                        .range_attribute(..10, piet::TextAttribute::Underline(true))
+                        .range_attribute(2..10, piet::TextAttribute::Underline(true))
                         .build()
                         .unwrap();
                     let mut lines = LineProcessor::new();
@@ -143,6 +143,7 @@ fn main() {
 
                         let path = {
                             let mut builder = tiny_skia::PathBuilder::new();
+                            let line = line.line;
                             builder.move_to(line.p0.x as f32, line.p0.y as f32);
                             builder.line_to(line.p1.x as f32, line.p1.y as f32);
                             builder.close();

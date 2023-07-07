@@ -24,9 +24,26 @@
 //! [`line-straddler`]: https://crates.io/crates/line-straddler
 
 use crate::Metadata;
+
 use core::mem;
 use cosmic_text::LayoutGlyph;
-use line_straddler::{Glyph, GlyphStyle, Line, LineGenerator, LineType};
+use line_straddler::{Glyph, GlyphStyle, Line as LsLine, LineGenerator, LineType};
+
+use piet::kurbo::{Line, Point};
+use piet::Color;
+
+/// A bundle between a line and a glyph styling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StyledLine {
+    /// The line.
+    pub line: Line,
+
+    /// The color of the line.
+    pub color: Color,
+
+    /// Whether or not the line is bolded.
+    pub bold: bool,
+}
 
 /// State for text processing underlines and strikethroughs using [`line-straddler`].
 ///
@@ -40,7 +57,7 @@ pub struct LineProcessor {
     strikethrough: LineGenerator,
 
     /// The lines to draw.
-    lines: Vec<piet::kurbo::Line>,
+    lines: Vec<StyledLine>,
 }
 
 impl Default for LineProcessor {
@@ -114,7 +131,7 @@ impl LineProcessor {
     }
 
     /// Take the associated lines.
-    pub fn lines(&mut self) -> Vec<piet::kurbo::Line> {
+    pub fn lines(&mut self) -> Vec<StyledLine> {
         // Pop the last lines.
         let underline = self.underline.pop_line();
         let strikethrough = self.strikethrough.pop_line();
@@ -125,9 +142,20 @@ impl LineProcessor {
     }
 }
 
-fn cvt_line(line: Line) -> piet::kurbo::Line {
-    piet::kurbo::Line {
-        p0: piet::kurbo::Point::new(line.start_x.into(), line.y.into()),
-        p1: piet::kurbo::Point::new(line.end_x.into(), line.y.into()),
+fn cvt_line(ls_line: LsLine) -> StyledLine {
+    let line = Line {
+        p0: Point::new(ls_line.start_x.into(), ls_line.y.into()),
+        p1: Point::new(ls_line.end_x.into(), ls_line.y.into()),
+    };
+
+    StyledLine {
+        line,
+        color: cvt_color(ls_line.style.color),
+        bold: ls_line.style.bold,
     }
+}
+
+fn cvt_color(color: line_straddler::Color) -> Color {
+    let [r, g, b, a] = color.components();
+    Color::rgba8(r, g, b, a)
 }
