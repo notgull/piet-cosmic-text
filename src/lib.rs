@@ -754,9 +754,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
                 Some(font_system) => font_system,
                 None => {
                     warn!("Still waiting for font system to be loaded, returning error");
-                    return Err(Error::BackendError(
-                        FontError::NotLoaded.into()
-                    ));
+                    return Err(Error::BackendError(FontError::NotLoaded.into()));
                 }
             };
 
@@ -772,11 +770,19 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             buffer
         };
 
+        // Figure out the metrics.
+        let run_metrics = buffer
+            .layout_runs()
+            .map(|run| RunMetrics::new(run, font_size))
+            .map(|RunMetrics { line_metric }| line_metric)
+            .collect();
+
         Ok(TextLayout {
             text_buffer: Rc::new(BufferWrapper {
                 string,
                 glyph_size: font_size as i32,
                 buffer: Some(buffer),
+                run_metrics,
                 handle,
             }),
         })
@@ -808,6 +814,9 @@ struct BufferWrapper {
 
     /// The original buffer.
     buffer: Option<Buffer>,
+
+    /// Run metrics.
+    run_metrics: Vec<piet::LineMetric>,
 
     /// The text handle.
     handle: Text,
@@ -899,20 +908,7 @@ impl piet::TextLayout for TextLayout {
     }
 
     fn line_metric(&self, line_number: usize) -> Option<piet::LineMetric> {
-        self.layout_runs().nth(line_number).map(|run| {
-            let (start, end) = run.glyphs.iter().fold((0, 0), |(start, end), glyph| {
-                (cmp::min(start, glyph.start), cmp::max(end, glyph.end))
-            });
-
-            piet::LineMetric {
-                start_offset: start,
-                end_offset: end,
-                trailing_whitespace: 0, // TODO
-                y_offset: run.line_y as _,
-                height: self.text_buffer.glyph_size as _,
-                baseline: run.line_y as f64 + self.text_buffer.glyph_size as f64,
-            }
-        })
+        self.text_buffer.run_metrics.get(line_number).cloned()
     }
 
     fn line_count(&self) -> usize {
@@ -1090,8 +1086,7 @@ impl Attributes {
                 TextAttribute::FontSize(_) => {
                     // TODO: cosmic-text does not support variable sized text yet.
                     // https://github.com/pop-os/cosmic-text/issues/64
-                    error!("cosmic-text does not support variable size fonts yet");
-                    return Err(Error::Unimplemented);
+                    error!("piet-cosmic-text does not support variable size fonts yet");
                 }
                 TextAttribute::Strikethrough(st) => {
                     with_metadata!(|meta| meta.set_strikethrough(*st));
@@ -1203,6 +1198,34 @@ impl Attributes {
         }
 
         Ok(result)
+    }
+}
+
+/// Line metrics associated with a layout run.
+struct RunMetrics {
+    /// The `piet` line metrics.
+    line_metric: piet::LineMetric,
+}
+
+impl RunMetrics {
+    fn new(run: ct::LayoutRun<'_>, glyph_size: f64) -> RunMetrics {
+        let (start_offset, end_offset) = run.glyphs.iter().fold((0, 0), |(start, end), glyph| {
+            (cmp::min(start, glyph.start), cmp::max(end, glyph.end))
+        });
+
+        let y_offset = run.line_top.into();
+        let baseline = run.line_y as f64 - run.line_top as f64;
+
+        RunMetrics {
+            line_metric: piet::LineMetric {
+                start_offset,
+                end_offset,
+                trailing_whitespace: 0, // TODO
+                y_offset,
+                height: glyph_size as _,
+                baseline,
+            },
+        }
     }
 }
 
