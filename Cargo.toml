@@ -46,7 +46,16 @@ tiny-skia = { version = "0.11.1", default-features = false, features = ["std"] }
 tracing-subscriber = "0.3.17"
 winit = { version = "0.28.1", default-features = false, features = ["x11"] }
 
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+console_error_panic_hook = "0.1.7"
+console_log = "1.0.0"
+web-sys = { version = "0.3", features=["HtmlCanvasElement", "WebGl2RenderingContext", "Window"] }
+wasm-bindgen = { version = "0.2" }
+
 [features]
 default = ["std", "tracing"]
 rayon = ["rayon-core"]
 std = ["cosmic-text/std"]
+
+[workspace]
+members = ["run-wasm"]

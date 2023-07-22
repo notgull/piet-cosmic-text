@@ -28,22 +28,38 @@ use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::EventLoop,
-    platform::run_return::EventLoopExtRunReturn,
     window::WindowBuilder,
 };
 
 pub(super) fn run(mut f: impl FnMut(&mut Text, usize, usize) -> TextLayout + 'static) {
+    #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
     tracing_subscriber::fmt::init();
+
+    #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+
+    #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+    console_log::init().unwrap();
 
     let mut width = 720;
     let mut height = 480;
 
-    let mut event_loop = EventLoop::new();
+    let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("piet text example")
         .with_inner_size(LogicalSize::new(width as u32, height as u32))
         .build(&event_loop)
         .unwrap();
+
+    #[cfg(any(target_arch = "wasm32", target_arch = "wasm64"))]
+    {
+        use winit::platform::web::WindowExtWebSys;
+
+        let canvas = window.canvas();
+        let document = web_sys::window().unwrap().document().unwrap();
+        let body = document.body().unwrap();
+        body.append_child(&canvas).unwrap();
+    }
 
     let mut context = unsafe { softbuffer::GraphicsContext::new(&window, &window).unwrap() };
 
@@ -52,7 +68,7 @@ pub(super) fn run(mut f: impl FnMut(&mut Text, usize, usize) -> TextLayout + 'st
 
     let mut swash_cache = SwashCache::new();
 
-    event_loop.run_return(move |event, _, control_flow| {
+    event_loop.run(move |event, _, control_flow| {
         control_flow.set_wait();
 
         match event {
