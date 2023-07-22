@@ -941,6 +941,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             .collect();
 
         drop(font_system_guard);
+
         Ok(TextLayout {
             text_buffer: Rc::new(BufferWrapper {
                 string,
