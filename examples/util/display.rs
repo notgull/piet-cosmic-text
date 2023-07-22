@@ -24,6 +24,7 @@
 use cosmic_text::SwashCache;
 use piet::{kurbo::Vec2, TextLayout as _};
 use piet_cosmic_text::{LineProcessor, Text, TextLayout};
+use std::num::NonZeroU32;
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -61,11 +62,22 @@ pub(super) fn run(mut f: impl FnMut(&mut Text, usize, usize) -> TextLayout + 'st
         body.append_child(&canvas).unwrap();
     }
 
-    let mut context = unsafe { softbuffer::GraphicsContext::new(&window, &window).unwrap() };
+    let context = unsafe { softbuffer::Context::new(&window).unwrap() };
+    let mut surface = unsafe { softbuffer::Surface::new(&context, &window).unwrap() };
 
+    // Figure out window sizing.
+    let window_size = window.inner_size();
+    surface
+        .resize(
+            NonZeroU32::new(window_size.width).unwrap(),
+            NonZeroU32::new(window_size.height).unwrap(),
+        )
+        .unwrap();
+    width = window_size.width as usize;
+    height = window_size.height as usize;
+
+    // Text resources.
     let mut text = Text::new();
-    let mut buffer = vec![0u32; width * height];
-
     let mut swash_cache = SwashCache::new();
 
     event_loop.run(move |event, _, control_flow| {
@@ -83,10 +95,18 @@ pub(super) fn run(mut f: impl FnMut(&mut Text, usize, usize) -> TextLayout + 'st
             } => {
                 width = size.width as usize;
                 height = size.height as usize;
-                buffer.resize(width * height, 0);
+                surface
+                    .resize(
+                        NonZeroU32::new(width as u32).unwrap(),
+                        NonZeroU32::new(height as u32).unwrap(),
+                    )
+                    .unwrap();
             }
 
             Event::RedrawEventsCleared => {
+                // Get the softbuffer internal buffer.
+                let mut buffer = surface.buffer_mut().unwrap();
+
                 // Fill buffer with white.
                 buffer.fill(0x00FFFFFF);
 
@@ -200,7 +220,7 @@ pub(super) fn run(mut f: impl FnMut(&mut Text, usize, usize) -> TextLayout + 'st
                 }
 
                 // Push buffer to softbuffer.
-                context.set_buffer(&buffer, width as _, height as _);
+                buffer.present().unwrap();
             }
 
             _ => (),
