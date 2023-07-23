@@ -49,25 +49,56 @@ pub(crate) fn embed_font_data() -> Result {
     // Create the output directory.
     fs::create_dir_all(&font_out_dir)?;
 
-    let mut file = BufWriter::new(fs::File::create(font_out_dir.join("font_data.bin"))?);
+    let file = BufWriter::new(fs::File::create(font_out_dir.join("font_data.bin"))?);
 
     // If we aren't compressing the font, just write it all out.
     #[cfg(not(feature = "compress_fonts"))]
     {
-        write_font_data(&font_data_root, &mut file)?;
+        write_font_data(&font_data_root, file)?;
     }
 
     // If we are compressing the font, write it out using the LZMA2 algorithm.
     #[cfg(feature = "compress_fonts")]
     {
-        let mut buf = vec![];
-        write_font_data(&font_data_root, &mut buf)?;
-
         // Compress it and write it to the file.
-        lzma_rs::lzma_compress(&mut &*buf, &mut file)?;
-    }
+        //
+        // Nota Bene (notgull): Analysis of various compression-based crates for Rust, when it comes
+        // to this data.
+        //
+        // I want a pure-Rust compression crate here, as I'd like as few C libraries in my tree as
+        // possible. I've included some crates that use C libraries for comparison.
+        //
+        // - Uncompressed, the data is around 1.5 MB
+        // - With `lzma_rs::lzma2_compress`, it looks to be around 1.5 MB as well. It looks like the
+        //   implementation of LZMA2 here doesn't do any actual compression?
+        // - With `lzma_rs::lzma_compress` we get down to 1.01 MB.
+        // - All of `flate2`'s encoders give us a compression of around 784 KB.
+        // - With `zstd`, we get down to 704 KB. This uses a C library, unfortunately.
+        // - `rust-lzma` with compression present 6 gets us down to 604 KB.
+        // - `xz2` gets us down to a whopping 568 KB.
+        // - `lz4` gives us 900 KB.
+        // - `snap` gives us 1.1 MB.
+        // - `yazi` gets us 784 KB, the same as `flate2`.
+        //
+        // It looks like the Rust LZMA implementation is still lacking a bit, as it falls far behind
+        // the C LZMA and XZ implementations. `xz2` gives us the best compression if we were willing
+        // to use C libraries. `flate2` and `yazi` give us the best compression if we want to stick
+        // to pure Rust. I prefer `yazi` in this case, as it already exists in the dependency tree
+        // for `cosmic-text` thanks to `swash`.
+        //
+        // For now, this isn't too important. But, in the future, it would be nice to either write
+        // a better XZ implementation in Rust or sponsor someone to do that.
+        let mut file = file;
 
-    //    panic!("Font data written to {:?}", font_out_dir);
+        let mut encoder = {
+            let mut encoder = yazi::Encoder::new();
+            encoder.set_format(yazi::Format::Raw);
+            encoder.set_level(yazi::CompressionLevel::BestSize);
+            encoder
+        };
+
+        write_font_data(&font_data_root, encoder.stream(&mut file))?;
+    }
 
     Ok(())
 }
