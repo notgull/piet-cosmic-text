@@ -53,9 +53,14 @@ web-sys = { version = "0.3", features=["HtmlCanvasElement", "WebGl2RenderingCont
 wasm-bindgen = { version = "0.2" }
 
 [features]
-default = ["std", "tracing"]
+default = ["compress_fonts", "std", "tracing"]
+compress_fonts = ["embed_fonts", "lzma-rs"]
+embed_fonts = []
 rayon = ["rayon-core"]
 std = ["cosmic-text/std"]
 
 [workspace]
 members = ["run-wasm"]
+
+[build-dependencies]
+lzma-rs = { version = "0.3.0", optional = true }

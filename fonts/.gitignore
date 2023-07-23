@@ -1,0 +1,5 @@
+fontconfig/
+ttf/*.ttf
+!ttf/DejaVuSans.ttf
+!ttf/DejaVuSansMono.ttf
+!ttf/DejaVuSerif.ttf
