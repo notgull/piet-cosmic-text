@@ -24,6 +24,7 @@
 //! These fonts act as a backup for when the system fonts are not available. This tends to happen
 //! especially on web targets.
 
+use cosmic_text::fontdb::ID as FontId;
 use cosmic_text::FontSystem;
 use std::io::{prelude::*, Error};
 use std::mem;
@@ -32,11 +33,12 @@ use std::mem;
 const FONT_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/font_data/font_data.bin"));
 
 /// Load the embedded font data into the font system.
-pub(super) fn load_embedded_font_data(system: &mut FontSystem) -> Result<(), Error> {
+#[allow(clippy::needless_return)]
+pub(super) fn load_embedded_font_data(system: &mut FontSystem) -> Result<Vec<FontId>, Error> {
     #[cfg(not(feature = "compress_fonts"))]
     {
         // Just read straight from the embedded data.
-        read_font_data(system, FONT_DATA)?;
+        return read_font_data(system, FONT_DATA);
     }
 
     #[cfg(feature = "compress_fonts")]
@@ -59,31 +61,22 @@ pub(super) fn load_embedded_font_data(system: &mut FontSystem) -> Result<(), Err
             )
         })?;
 
-        read_font_data(system, &mut &*decoded_data)?;
+        return read_font_data(system, &mut &*decoded_data);
     }
-
-    // Set default fonts.
-    let db = system.db_mut();
-    db.set_serif_family("DejaVu Serif");
-    db.set_sans_serif_family("DejaVu Sans");
-    db.set_monospace_family("DejaVu Sans Mono");
-
-    Ok(())
 }
 
 /// Read from font data into the font system.
-fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<(), Error> {
+fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<Vec<FontId>, Error> {
     let mut buf = vec![0; 8];
     let mut cursor;
+    let mut all_ids = vec![];
 
     loop {
         // Read the eight bytes representing the length of the font name.
         buf.resize(8, 0);
         cursor = 0;
         match reader.read(&mut buf[cursor..])? {
-            0 => {
-                break
-            },
+            0 => break,
             n => {
                 cursor += n;
                 if cursor < 8 {
@@ -98,11 +91,11 @@ fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<(), 
         reader.by_ref().take(length).read_to_end(&mut buf)?;
 
         // Insert it into the font system.
-        let ids = system.db_mut().load_font_source(
-            cosmic_text::fontdb::Source::Binary(
-                std::sync::Arc::new(mem::take(&mut buf))
-            )
-        );
+        let ids = system
+            .db_mut()
+            .load_font_source(cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(
+                mem::take(&mut buf),
+            )));
         assert!(!ids.is_empty());
 
         for id in ids {
@@ -113,8 +106,9 @@ fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<(), 
                     tracing::debug!("Loaded default font: {}", _name);
                 }
             }
+            all_ids.push(id);
         }
     }
 
-    Ok(())
+    Ok(all_ids)
 }
