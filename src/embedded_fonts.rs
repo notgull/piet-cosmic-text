@@ -20,6 +20,101 @@
 // Public License along with `piet-cosmic-text`. If not, see <https://www.gnu.org/licenses/>.
 
 //! Fonts that are embedded into the `FontSystem` by default.
-//! 
+//!
 //! These fonts act as a backup for when the system fonts are not available. This tends to happen
-//! especially on web targets. 
+//! especially on web targets.
+
+use cosmic_text::FontSystem;
+use std::io::{prelude::*, Error};
+use std::mem;
+
+// The raw data emitted by build/embed_fonts.rs.
+const FONT_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/font_data/font_data.bin"));
+
+/// Load the embedded font data into the font system.
+pub(super) fn load_embedded_font_data(system: &mut FontSystem) -> Result<(), Error> {
+    #[cfg(not(feature = "compress_fonts"))]
+    {
+        // Just read straight from the embedded data.
+        read_font_data(system, FONT_DATA)?;
+    }
+
+    #[cfg(feature = "compress_fonts")]
+    {
+        // Use `yazi` to decompress the font data.
+        let mut decoder = {
+            let mut decoder = yazi::Decoder::boxed();
+            decoder.set_format(yazi::Format::Raw);
+            decoder
+        };
+
+        // Write the decoded data into a buffer.
+        let mut decoded_data = Vec::new();
+        let mut stream = decoder.stream_into_vec(&mut decoded_data);
+        stream.write_all(FONT_DATA)?;
+        stream.finish().map_err(|_| {
+            Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Failed to decode font data",
+            )
+        })?;
+
+        read_font_data(system, &mut &*decoded_data)?;
+    }
+
+    // Set default fonts.
+    let db = system.db_mut();
+    db.set_serif_family("DejaVu Serif");
+    db.set_sans_serif_family("DejaVu Sans");
+    db.set_monospace_family("DejaVu Sans Mono");
+
+    Ok(())
+}
+
+/// Read from font data into the font system.
+fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<(), Error> {
+    let mut buf = vec![0; 8];
+    let mut cursor;
+
+    loop {
+        // Read the eight bytes representing the length of the font name.
+        buf.resize(8, 0);
+        cursor = 0;
+        match reader.read(&mut buf[cursor..])? {
+            0 => {
+                tracing::info!("Finished reading all embedded fonts.");
+                break
+            },
+            n => {
+                cursor += n;
+                if cursor < 8 {
+                    continue;
+                }
+            }
+        }
+
+        // Read the entire font file.
+        let length = u64::from_le_bytes(buf[..8].try_into().unwrap());
+        buf.clear();
+        reader.by_ref().take(length).read_to_end(&mut buf)?;
+
+        // Insert it into the font system.
+        let ids = system.db_mut().load_font_source(
+            cosmic_text::fontdb::Source::Binary(
+                std::sync::Arc::new(mem::take(&mut buf))
+            )
+        );
+        assert!(!ids.is_empty());
+
+        for id in ids {
+            let font = system.db().face(id);
+            if let Some(font) = font {
+                for (name, _) in &font.families {
+                    tracing::info!("Loaded default font: {}", name);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}

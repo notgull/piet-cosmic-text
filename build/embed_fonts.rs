@@ -91,7 +91,7 @@ pub(crate) fn embed_font_data() -> Result {
         let mut file = file;
 
         let mut encoder = {
-            let mut encoder = yazi::Encoder::new();
+            let mut encoder = yazi::Encoder::boxed();
             encoder.set_format(yazi::Format::Raw);
             encoder.set_level(yazi::CompressionLevel::BestSize);
             encoder

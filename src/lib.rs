@@ -50,6 +50,8 @@ pub use cosmic_text;
 pub use piet;
 
 mod channel;
+#[cfg(feature = "embed_fonts")]
+mod embedded_fonts;
 mod lines;
 
 use event_listener::Event;
@@ -407,7 +409,17 @@ impl Text {
         let (send, recv) = channel::channel();
 
         thread.run(move || {
-            let fs = FontSystem::new();
+            #[allow(unused_mut)]
+            let mut fs = FontSystem::new();
+
+            // Embed the fonts into the system.
+            #[cfg(feature = "embed_fonts")]
+            {
+                if let Err(err) = embedded_fonts::load_embedded_font_data(&mut fs) {
+                    error!("failed to load embedded font data: {}", err);
+                }
+            }
+
             send.send(fs);
         });
 
