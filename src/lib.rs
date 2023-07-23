@@ -31,16 +31,64 @@
 //! [`TextLayout`]. All of these are intended to be used in the same way as the
 //! corresponding types in [`piet`]. However, [`TextLayout`] has a `buffer` method that
 //! can be used to get the underlying text.
+//! 
+//! The structures provided by this crate are completely renderer-agnostic. The [`TextLayout`]
+//! structure exposes the underlying [`Buffer`] structure, which can be used to render the text.
+//! 
+//! # Embedded Fonts
+//! 
+//! In order to make it easier to use this crate in a cross platform setting, it embeds a handful
+//! of fonts into the binary. These fonts are used as a fallback when the system fonts are not
+//! available. For instance, on web targets, there are no fonts available by default, so these
+//! fonts are used instead. In addition, if attributes fail to match any of the fonts on the
+//! system, these fonts are used as a fallback.
+//! 
+//! Without compression, these fonts add around 1.5 megabytes to the final binary. With the
+//! `DEFLATE` compression algorithm, which is enabled by default, this is reduced to around
+//! 1.1 megabytes. In practice it's actually around 700 kilobytes, as the remaining data is used
+//! by the compressions algorithm. [`yazi`] is used to compress the font data; as it is also used
+//! by [`swash`], which is often used with [`cosmic-text`], the actual amount of data saved should
+//! be closer to the theoretical maximum.
+//! 
+//! To disable font compression, disable the default `compress-fonts` feature. To disable embedding
+//! fonts altogether, disable the default `embed-fonts` feature.
+//! 
+//! # Font Initialization
+//! 
+//! The initialization of the [`FontSystem`] can take some time, especially on slower systems with
+//! many thousand fonts. In order to prevent font loading from blocking the main windowing thread,
+//! [`Text`] has an option to use a background thread to load the fonts. Enabling the `rayon`
+//! feature (not enabled by default) will export font loading to the [`rayon`] thread pool.
+//! Without this feature, font loading will be done on the current thread.
+//! 
+//! As web targets do not support threads, enabling the `rayon` feature on web targets will lead
+//! to compilation errors.
+//! 
+//! Sufficiently complex programs usually already have a system set up to handle blocking tasks.
+//! For `async` programs, this is usually [`tokio`]'s [`spawn_blocking`] function or the
+//! [`blocking`] thread pool. In these cases you can implement the [`ExportWork`] trait and then
+//! pass it to [`Text::with_thread`]. This will allow you to use the same thread pool for both
+//! font loading and other blocking tasks.
+//! 
+//! The `is_loaded` method of [`Text`](crate::Text) can be used to check if the font system is
+//! fully loaded. 
 //!
 //! # Limitations
 //!
-//! - New fonts cannot be loaded while a [`TextLayout`] is alive.
-//! - The text does not support [`TextAlignment`] or variable font sizes. Attempting to
-//!   use these will result in an error.
+//! The text does not support variable font sizes. Attempting to use these will result in emitting
+//! an error to the logs, and the text size not actually being changed.
 //!
 //! [`piet`]: https://docs.rs/piet
 //! [`cosmic-text`]: https://docs.rs/cosmic-text
-//! [`TextAlignment`]: https://docs.rs/piet/latest/piet/enum.TextAlignment.html
+//! [`Buffer`]: https://docs.rs/cosmic-text/latest/cosmic_text/struct.Buffer.html
+//! [`Text`]: https://docs.rs/piet/latest/piet/trait.Text.html
+//! [`FontSystem`]: https://docs.rs/cosmic-text/latest/cosmic_text/fontdb/struct.FontSystem.html
+//! [`yazi`]: https://docs.rs/yazi
+//! [`swash`]: https://docs.rs/swash
+//! [`rayon`]: https://docs.rs/rayon
+//! [`tokio`]: https://docs.rs/tokio
+//! [`spawn_blocking`]: https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html
+//! [`blocking`]: https://docs.rs/blocking
 
 #![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
@@ -415,8 +463,8 @@ impl Text {
             // Embed the fonts into the system.
             #[cfg(feature = "embed_fonts")]
             {
-                if let Err(err) = embedded_fonts::load_embedded_font_data(&mut fs) {
-                    error!("failed to load embedded font data: {}", err);
+                if let Err(_err) = embedded_fonts::load_embedded_font_data(&mut fs) {
+                    error!("failed to load embedded font data: {}", _err);
                 }
             }
 

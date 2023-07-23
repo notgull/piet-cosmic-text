@@ -82,7 +82,6 @@ fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<(), 
         cursor = 0;
         match reader.read(&mut buf[cursor..])? {
             0 => {
-                tracing::info!("Finished reading all embedded fonts.");
                 break
             },
             n => {
@@ -109,8 +108,9 @@ fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<(), 
         for id in ids {
             let font = system.db().face(id);
             if let Some(font) = font {
-                for (name, _) in &font.families {
-                    tracing::info!("Loaded default font: {}", name);
+                for (_name, _) in &font.families {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!("Loaded default font: {}", _name);
                 }
             }
         }
