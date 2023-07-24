@@ -110,5 +110,13 @@ fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<Vec<
         }
     }
 
+    set_default_fonts(system);
+
     Ok(all_ids)
+}
+
+fn set_default_fonts(fs: &mut FontSystem) {
+    fs.db_mut().set_monospace_family("DejaVu Sans Mono");
+    fs.db_mut().set_sans_serif_family("DejaVu Sans");
+    fs.db_mut().set_serif_family("DejaVu Serif");
 }
