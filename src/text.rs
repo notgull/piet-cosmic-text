@@ -21,11 +21,13 @@
 
 //! The `Text` API, the root of the system.
 
-use crate::export_work::{CurrentThread, ExportWork};
-use crate::{
-    channel, embedded_fonts, error, warn, warn_span, FontError, TextLayout, TextLayoutBuilder,
-    STANDARD_DPI,
-};
+use crate::export_work::ExportWork;
+use crate::text_layout::TextLayout;
+use crate::text_layout_builder::TextLayoutBuilder;
+use crate::{channel, embedded_fonts, error, warn, warn_span, FontError, STANDARD_DPI};
+
+#[cfg(not(feature = "rayon"))]
+use crate::export_work::CurrentThread;
 
 #[cfg(feature = "rayon")]
 use crate::export_work::Rayon;

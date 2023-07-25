@@ -111,8 +111,6 @@ pub use text_layout_builder::TextLayoutBuilder;
 #[cfg(feature = "rayon")]
 pub use export_work::Rayon;
 
-use text::FontSystemAndDefaults;
-
 const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
 

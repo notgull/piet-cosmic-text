@@ -23,7 +23,7 @@
 //!
 //! [`line-straddler`]: https://crates.io/crates/line-straddler
 
-use crate::Metadata;
+use crate::metadata::Metadata;
 
 use core::mem;
 use cosmic_text::LayoutGlyph;
