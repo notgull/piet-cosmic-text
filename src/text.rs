@@ -24,7 +24,7 @@
 use crate::export_work::ExportWork;
 use crate::text_layout::TextLayout;
 use crate::text_layout_builder::TextLayoutBuilder;
-use crate::{channel, embedded_fonts, error, warn, warn_span, FontError, STANDARD_DPI};
+use crate::{channel, embedded_fonts, FontError, STANDARD_DPI};
 
 #[cfg(not(feature = "rayon"))]
 use crate::export_work::CurrentThread;

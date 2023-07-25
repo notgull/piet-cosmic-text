@@ -23,7 +23,7 @@
 
 use crate::metadata::Metadata;
 use crate::text::FontSystemAndDefaults;
-use crate::{cvt_color, cvt_family, cvt_style, cvt_weight, error, trace, trace_span};
+use crate::{cvt_color, cvt_family, cvt_style, cvt_weight};
 
 use cosmic_text as ct;
 use ct::{Attrs, AttrsList, AttrsOwned};

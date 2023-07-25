@@ -114,12 +114,16 @@ pub use export_work::Rayon;
 const STANDARD_DPI: f64 = 96.0;
 const POINTS_PER_INCH: f64 = 72.0;
 
-#[cfg(feature = "tracing")]
-use tracing::{error, trace, trace_span, warn, warn_span};
-
 #[cfg(not(feature = "tracing"))]
 macro_rules! error {
     ($($tt:tt)*) => {};
+}
+
+#[cfg(feature = "tracing")]
+macro_rules! error {
+    ($($tt:tt)*) => {
+        tracing::error!($($tt)*)
+    };
 }
 
 #[cfg(not(feature = "tracing"))]
@@ -127,9 +131,23 @@ macro_rules! warn {
     ($($tt:tt)*) => {};
 }
 
+#[cfg(feature = "tracing")]
+macro_rules! warn {
+    ($($tt:tt)*) => {
+        tracing::warn!($($tt)*)
+    };
+}
+
 #[cfg(not(feature = "tracing"))]
 macro_rules! trace {
     ($($tt:tt)*) => {};
+}
+
+#[cfg(feature = "tracing")]
+macro_rules! trace {
+    ($($tt:tt)*) => {
+        tracing::trace!($($tt)*)
+    };
 }
 
 #[cfg(not(feature = "tracing"))]
@@ -139,10 +157,24 @@ macro_rules! trace_span {
     };
 }
 
+#[cfg(feature = "tracing")]
+macro_rules! trace_span {
+    ($($tt:tt)*) => {
+        tracing::trace_span!($($tt)*)
+    };
+}
+
 #[cfg(not(feature = "tracing"))]
 macro_rules! warn_span {
     ($($tt:tt)*) => {
         Span
+    };
+}
+
+#[cfg(feature = "tracing")]
+macro_rules! warn_span {
+    ($($tt:tt)*) => {
+        tracing::warn_span!($($tt)*)
     };
 }
 
