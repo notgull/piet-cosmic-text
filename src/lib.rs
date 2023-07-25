@@ -520,6 +520,24 @@ impl Text {
                 }
             }
 
+            // Add default serif fonts to the defaults.
+            {
+                let mut add_defaults = |family: Family<'_>| {
+                    if let Some(font) = fs.db().query(&Query {
+                        families: &[family],
+                        ..Default::default()
+                    }) {
+                        defaults.push(font);
+                    } else {
+                        warn!("failed to find default font for family {:?}", family);
+                    }
+                };
+
+                add_defaults(Family::Serif);
+                add_defaults(Family::SansSerif);
+                add_defaults(Family::Monospace);
+            }
+
             send.send(FontSystemAndDefaults {
                 system: fs,
                 default_fonts: defaults,
