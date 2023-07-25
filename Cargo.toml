@@ -37,16 +37,32 @@ line-straddler = "0.2.0"
 piet = { version = "0.6.2", default-features = false }
 rayon-core = { version = "1.11.0", optional = true }
 tracing = { version = "0.1.37", default-features = false, optional = true }
+yazi = { version = "0.1.6", optional = true }
+
+[build-dependencies]
+yazi = { version = "0.1.6", optional = true }
+
+[features]
+default = ["compress_fonts", "std", "tracing"]
+compress_fonts = ["embed_fonts", "yazi"]
+embed_fonts = []
+rayon = ["rayon-core"]
+std = ["cosmic-text/std"]
 
 [dev-dependencies]
 bytemuck = "1.13.1"
 cosmic-text = { version = "0.9.0", features = ["swash"] }
-softbuffer = { version = "0.2.0", default-features = false, features = ["x11"] }
+softbuffer = { version = "0.3.0", default-features = false, features = ["x11"] }
 tiny-skia = { version = "0.11.1", default-features = false, features = ["std"] }
+tracing = "0.1"
 tracing-subscriber = "0.3.17"
 winit = { version = "0.28.1", default-features = false, features = ["x11"] }
 
-[features]
-default = ["std", "tracing"]
-rayon = ["rayon-core"]
-std = ["cosmic-text/std"]
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+console_error_panic_hook = "0.1.7"
+console_log = "1.0.0"
+web-sys = { version = "0.3", features=["HtmlCanvasElement", "WebGl2RenderingContext", "Window"] }
+wasm-bindgen = { version = "0.2" }
+
+[workspace]
+members = ["run-wasm"]

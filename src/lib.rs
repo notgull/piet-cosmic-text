@@ -32,15 +32,63 @@
 //! corresponding types in [`piet`]. However, [`TextLayout`] has a `buffer` method that
 //! can be used to get the underlying text.
 //!
+//! The structures provided by this crate are completely renderer-agnostic. The [`TextLayout`]
+//! structure exposes the underlying [`Buffer`] structure, which can be used to render the text.
+//!
+//! # Embedded Fonts
+//!
+//! In order to make it easier to use this crate in a cross platform setting, it embeds a handful
+//! of fonts into the binary. These fonts are used as a fallback when the system fonts are not
+//! available. For instance, on web targets, there are no fonts available by default, so these
+//! fonts are used instead. In addition, if attributes fail to match any of the fonts on the
+//! system, these fonts are used as a fallback.
+//!
+//! Without compression, these fonts add around 1.5 megabytes to the final binary. With the
+//! `DEFLATE` compression algorithm, which is enabled by default, this is reduced to around
+//! 1.1 megabytes. In practice it's actually around 700 kilobytes, as the remaining data is used
+//! by the compressions algorithm. [`yazi`] is used to compress the font data; as it is also used
+//! by [`swash`], which is often used with [`cosmic-text`], the actual amount of data saved should
+//! be closer to the theoretical maximum.
+//!
+//! To disable font compression, disable the default `compress-fonts` feature. To disable embedding
+//! fonts altogether, disable the default `embed-fonts` feature.
+//!
+//! # Font Initialization
+//!
+//! The initialization of the [`FontSystem`] can take some time, especially on slower systems with
+//! many thousand fonts. In order to prevent font loading from blocking the main windowing thread,
+//! [`Text`] has an option to use a background thread to load the fonts. Enabling the `rayon`
+//! feature (not enabled by default) will export font loading to the [`rayon`] thread pool.
+//! Without this feature, font loading will be done on the current thread.
+//!
+//! As web targets do not support threads, enabling the `rayon` feature on web targets will lead
+//! to compilation errors.
+//!
+//! Sufficiently complex programs usually already have a system set up to handle blocking tasks.
+//! For `async` programs, this is usually [`tokio`]'s [`spawn_blocking`] function or the
+//! [`blocking`] thread pool. In these cases you can implement the [`ExportWork`] trait and then
+//! pass it to [`Text::with_thread`]. This will allow you to use the same thread pool for both
+//! font loading and other blocking tasks.
+//!
+//! The `is_loaded` method of [`Text`](crate::Text) can be used to check if the font system is
+//! fully loaded.
+//!
 //! # Limitations
 //!
-//! - New fonts cannot be loaded while a [`TextLayout`] is alive.
-//! - The text does not support [`TextAlignment`] or variable font sizes. Attempting to
-//!   use these will result in an error.
+//! The text does not support variable font sizes. Attempting to use these will result in emitting
+//! an error to the logs, and the text size not actually being changed.
 //!
 //! [`piet`]: https://docs.rs/piet
 //! [`cosmic-text`]: https://docs.rs/cosmic-text
-//! [`TextAlignment`]: https://docs.rs/piet/latest/piet/enum.TextAlignment.html
+//! [`Buffer`]: https://docs.rs/cosmic-text/latest/cosmic_text/struct.Buffer.html
+//! [`Text`]: https://docs.rs/piet/latest/piet/trait.Text.html
+//! [`FontSystem`]: https://docs.rs/cosmic-text/latest/cosmic_text/fontdb/struct.FontSystem.html
+//! [`yazi`]: https://docs.rs/yazi
+//! [`swash`]: https://docs.rs/swash
+//! [`rayon`]: https://docs.rs/rayon
+//! [`tokio`]: https://docs.rs/tokio
+//! [`spawn_blocking`]: https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html
+//! [`blocking`]: https://docs.rs/blocking
 
 #![allow(clippy::await_holding_refcell_ref)]
 #![forbid(unsafe_code, future_incompatible, rust_2018_idioms)]
@@ -50,13 +98,15 @@ pub use cosmic_text;
 pub use piet;
 
 mod channel;
+#[cfg(feature = "embed_fonts")]
+mod embedded_fonts;
 mod lines;
 
 use event_listener::Event;
 
-use cosmic_text as ct;
+use cosmic_text::{self as ct, AttrsOwned};
 
-use ct::fontdb::Family;
+use ct::fontdb::{Family, Query, ID as FontId};
 use ct::{Attrs, AttrsList, Buffer, BufferLine, FontSystem, LayoutRunIter, Metrics};
 
 use piet::kurbo::{Point, Rect, Size};
@@ -334,10 +384,10 @@ impl Drop for FontSystemGuard<'_> {
 #[allow(clippy::large_enum_variant)] // No need to box the FontSystem since it will be used soon.
 enum DelayedFontSystem {
     /// The real font system.
-    Real(FontSystem),
+    Real(FontSystemAndDefaults),
 
     /// We are waiting for a font system to be loaded.
-    Waiting(channel::Receiver<FontSystem>),
+    Waiting(channel::Receiver<FontSystemAndDefaults>),
 }
 
 impl fmt::Debug for DelayedFontSystem {
@@ -345,8 +395,9 @@ impl fmt::Debug for DelayedFontSystem {
         match self {
             Self::Real(fs) => f
                 .debug_struct("FontSystem")
-                .field("db", fs.db())
-                .field("locale", &fs.locale())
+                .field("db", fs.system.db())
+                .field("locale", &fs.system.locale())
+                .field("default_fonts", &fs.default_fonts)
                 .finish_non_exhaustive(),
             Self::Waiting(_) => f.write_str("<waiting for availability>"),
         }
@@ -355,10 +406,10 @@ impl fmt::Debug for DelayedFontSystem {
 
 impl DelayedFontSystem {
     /// Get the font system.
-    fn get(&mut self) -> Option<&mut FontSystem> {
+    fn get(&mut self) -> Option<&mut FontSystemAndDefaults> {
         loop {
             match self {
-                Self::Real(font_system) => return Some(font_system),
+                Self::Real(system) => return Some(system),
                 Self::Waiting(channel) => {
                     // Try to wait on the channel without blocking.
                     *self = Self::Real(channel.try_recv()?);
@@ -368,7 +419,7 @@ impl DelayedFontSystem {
     }
 
     /// Wait until the font system is loaded.
-    async fn wait(&mut self) -> &mut FontSystem {
+    async fn wait(&mut self) -> &mut FontSystemAndDefaults {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
@@ -378,13 +429,60 @@ impl DelayedFontSystem {
     }
 
     /// Wait until the font system is loaded, blocking redux.
-    fn wait_blocking(&mut self) -> &mut FontSystem {
+    fn wait_blocking(&mut self) -> &mut FontSystemAndDefaults {
         loop {
             match self {
                 Self::Real(font_system) => return font_system,
                 Self::Waiting(recv) => *self = Self::Real(recv.recv_blocking()),
             }
         }
+    }
+}
+
+/// The `FontSystem` and the bundled default fonts.
+struct FontSystemAndDefaults {
+    /// The underlying font system.
+    system: FontSystem,
+
+    /// Fonts to use if there are no font matches.
+    ///
+    /// This contains the default serif, sans-serif and monospace fonts, as well as
+    /// any fonts embedded into the executable.
+    default_fonts: Vec<FontId>,
+}
+
+impl FontSystemAndDefaults {
+    /// Modify the attributes until they match at least one font.
+    fn fix_attrs(&mut self, attrs: Attrs<'_>) -> AttrsOwned {
+        let mut owned = AttrsOwned::new(attrs);
+        let original = attrs;
+
+        // If we have a font, great!
+        if !self.system.get_font_matches(attrs).is_empty() {
+            return owned;
+        }
+
+        // If we don't, iterate over the default fonts until we do.
+        for _ in 0..2 {
+            for &default_font in &self.default_fonts {
+                if let Some(font) = self.system.db().face(default_font) {
+                    for (name, _) in font.families.clone() {
+                        owned.family_owned = ct::FamilyOwned::Name(name);
+                        if !self.system.get_font_matches(owned.as_attrs()).is_empty() {
+                            return owned;
+                        }
+                    }
+                }
+            }
+
+            // Reset the style info to as blank as possible and try again.
+            owned.style = ct::Style::Normal;
+            owned.weight = ct::Weight::NORMAL;
+        }
+
+        // Give up.
+        warn!("no fonts match attributes: {:?}", original);
+        AttrsOwned::new(original)
     }
 }
 
@@ -407,8 +505,43 @@ impl Text {
         let (send, recv) = channel::channel();
 
         thread.run(move || {
-            let fs = FontSystem::new();
-            send.send(fs);
+            #[allow(unused_mut)]
+            let mut fs = FontSystem::new();
+            let mut defaults = vec![];
+
+            // Embed the fonts into the system.
+            #[cfg(feature = "embed_fonts")]
+            {
+                match embedded_fonts::load_embedded_font_data(&mut fs) {
+                    Ok(mut ids) => defaults.append(&mut ids),
+                    Err(_err) => {
+                        error!("failed to load embedded font data: {}", _err)
+                    }
+                }
+            }
+
+            // Add default serif fonts to the defaults.
+            {
+                let mut add_defaults = |family: Family<'_>| {
+                    if let Some(font) = fs.db().query(&Query {
+                        families: &[family],
+                        ..Default::default()
+                    }) {
+                        defaults.push(font);
+                    } else {
+                        warn!("failed to find default font for family {:?}", family);
+                    }
+                };
+
+                add_defaults(Family::Serif);
+                add_defaults(Family::SansSerif);
+                add_defaults(Family::Monospace);
+            }
+
+            send.send(FontSystemAndDefaults {
+                system: fs,
+                default_fonts: defaults,
+            });
         });
 
         Self(Rc::new(Inner {
@@ -421,8 +554,26 @@ impl Text {
 
     /// Create a new `Text` renderer from a `FontSystem`.
     pub fn from_font_system(font_system: FontSystem) -> Self {
+        let defaults = {
+            let load_default_family = |family: Family<'_>| {
+                font_system.db().query(&Query {
+                    families: &[family],
+                    ..Default::default()
+                })
+            };
+
+            let mut defaults = vec![];
+            defaults.extend(load_default_family(Family::SansSerif));
+            defaults.extend(load_default_family(Family::Serif));
+            defaults.extend(load_default_family(Family::Monospace));
+            defaults
+        };
+
         Self(Rc::new(Inner {
-            font_db: RefCell::new(DelayedFontSystem::Real(font_system)),
+            font_db: RefCell::new(DelayedFontSystem::Real(FontSystemAndDefaults {
+                system: font_system,
+                default_fonts: defaults,
+            })),
             font_db_free: Event::new(),
             buffer: Cell::new(Vec::new()),
             dpi: Cell::new(STANDARD_DPI),
@@ -497,7 +648,7 @@ impl Text {
     /// Loading new fonts while this function is in use will result in an error.
     pub fn with_font_system_mut<R>(&self, f: impl FnOnce(&mut FontSystem) -> R) -> Option<R> {
         let mut font_db = self.0.borrow_font_system()?;
-        font_db.get().map(f)
+        font_db.get().map(|fs| f(&mut fs.system))
     }
 }
 
@@ -521,7 +672,7 @@ impl piet::Text for Text {
             (Family::SansSerif, FontFamily::SANS_SERIF),
             (Family::Monospace, FontFamily::MONOSPACE),
         ] {
-            let name = db.db().family_name(&name);
+            let name = db.system.db().family_name(&name);
             if name == family_name {
                 return Some(piet_name);
             }
@@ -529,10 +680,11 @@ impl piet::Text for Text {
 
         // Get the font family.
         let family = Family::Name(family_name);
-        let name = db.db().family_name(&family);
+        let name = db.system.db().family_name(&family);
 
         // Look for the font with that name.
         let font = db
+            .system
             .db()
             .faces()
             .flat_map(|face| &face.families)
@@ -557,6 +709,7 @@ impl piet::Text for Text {
         // Insert the data source into the underlying font database.
         let id = {
             let ids = db
+                .system
                 .db_mut()
                 .load_font_source(ct::fontdb::Source::Binary(Arc::new(data.to_vec())));
 
@@ -572,7 +725,11 @@ impl piet::Text for Text {
         };
 
         // Get the font back.
-        let font = db.db().face(id).ok_or_else(|| Error::FontLoadingFailed)?;
+        let font = db
+            .system
+            .db()
+            .face(id)
+            .ok_or_else(|| Error::FontLoadingFailed)?;
         Ok(FontFamily::new_unchecked(font.families[0].0.as_str()))
     }
 
@@ -693,6 +850,19 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             return Err(error);
         }
 
+        // Get a handle to the font system.
+        let mut font_system_guard = handle
+            .0
+            .borrow_font_system()
+            .ok_or(Error::BackendError(FontError::AlreadyBorrowed.into()))?;
+        let font_system = match font_system_guard.get() {
+            Some(font_system) => font_system,
+            None => {
+                warn!("Still waiting for font system to be loaded, returning error");
+                return Err(Error::BackendError(FontError::NotLoaded.into()));
+            }
+        };
+
         // Get the font size and line height.
         let font_size = defaults.font_size * handle.dpi() / POINTS_PER_INCH;
 
@@ -718,7 +888,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
                 attrs = attrs.color(cvt_color(defaults.fg_color));
             }
 
-            attrs
+            font_system.fix_attrs(attrs)
         };
 
         // Re-use memory from a previous layout.
@@ -730,7 +900,11 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             let end = start + line.len() + 1;
 
             // Get the attributes for this line.
-            let attrs_list = range_attributes.text_attributes(start..end, default_attrs)?;
+            let attrs_list = range_attributes.text_attributes(
+                font_system,
+                start..end,
+                default_attrs.as_attrs(),
+            )?;
 
             let mut line = BufferLine::new(line, attrs_list, shaping);
             line.set_align(self.alignment.map(|a| match a {
@@ -746,37 +920,33 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
         }
 
         let buffer = {
-            let mut font_system = handle
-                .0
-                .borrow_font_system()
-                .ok_or(Error::FontLoadingFailed)?;
-            let font_system = match font_system.get() {
-                Some(font_system) => font_system,
-                None => {
-                    warn!("Still waiting for font system to be loaded, returning error");
-                    return Err(Error::BackendError(
-                        FontError::NotLoaded.into()
-                    ));
-                }
-            };
-
-            let mut buffer = Buffer::new(font_system, metrics);
+            let FontSystemAndDefaults { system, .. } = font_system;
+            let mut buffer = Buffer::new(system, metrics);
 
             buffer.lines = buffer_lines;
-            buffer.set_size(font_system, max_width as f32, f32::INFINITY);
-            buffer.set_wrap(font_system, ct::Wrap::Word);
+            buffer.set_size(system, max_width as f32, f32::INFINITY);
+            buffer.set_wrap(system, ct::Wrap::Word);
 
             // Shape the buffer.
-            buffer.shape_until_scroll(font_system);
+            buffer.shape_until_scroll(system);
 
             buffer
         };
 
+        // Figure out the metrics.
+        let run_metrics = buffer
+            .layout_runs()
+            .map(|run| RunMetrics::new(run, font_size))
+            .map(|RunMetrics { line_metric }| line_metric)
+            .collect();
+
+        drop(font_system_guard);
         Ok(TextLayout {
             text_buffer: Rc::new(BufferWrapper {
                 string,
                 glyph_size: font_size as i32,
                 buffer: Some(buffer),
+                run_metrics,
                 handle,
             }),
         })
@@ -808,6 +978,9 @@ struct BufferWrapper {
 
     /// The original buffer.
     buffer: Option<Buffer>,
+
+    /// Run metrics.
+    run_metrics: Vec<piet::LineMetric>,
 
     /// The text handle.
     handle: Text,
@@ -899,20 +1072,7 @@ impl piet::TextLayout for TextLayout {
     }
 
     fn line_metric(&self, line_number: usize) -> Option<piet::LineMetric> {
-        self.layout_runs().nth(line_number).map(|run| {
-            let (start, end) = run.glyphs.iter().fold((0, 0), |(start, end), glyph| {
-                (cmp::min(start, glyph.start), cmp::max(end, glyph.end))
-            });
-
-            piet::LineMetric {
-                start_offset: start,
-                end_offset: end,
-                trailing_whitespace: 0, // TODO
-                y_offset: run.line_y as _,
-                height: self.text_buffer.glyph_size as _,
-                baseline: run.line_y as f64 + self.text_buffer.glyph_size as f64,
-            }
-        })
+        self.text_buffer.run_metrics.get(line_number).cloned()
     }
 
     fn line_count(&self) -> usize {
@@ -1061,9 +1221,10 @@ impl Attributes {
     /// Collect text attributes into a list.
     fn collect_attributes<'a>(
         &'a self,
+        system: &mut FontSystemAndDefaults,
         mut attrs: Attrs<'a>,
         indices: impl Iterator<Item = usize>,
-    ) -> Result<Attrs<'a>, Error> {
+    ) -> Result<AttrsOwned, Error> {
         macro_rules! with_metadata {
             ($closure:expr) => {{
                 // Necessary to tell the compiler about typing info.
@@ -1090,8 +1251,7 @@ impl Attributes {
                 TextAttribute::FontSize(_) => {
                     // TODO: cosmic-text does not support variable sized text yet.
                     // https://github.com/pop-os/cosmic-text/issues/64
-                    error!("cosmic-text does not support variable size fonts yet");
-                    return Err(Error::Unimplemented);
+                    error!("piet-cosmic-text does not support variable size fonts yet");
                 }
                 TextAttribute::Strikethrough(st) => {
                     with_metadata!(|meta| meta.set_strikethrough(*st));
@@ -1116,12 +1276,13 @@ impl Attributes {
             }
         }
 
-        Ok(attrs)
+        Ok(system.fix_attrs(attrs))
     }
 
     /// Iterate over the text attributes.
     fn text_attributes<'a>(
         &'a self,
+        system: &mut FontSystemAndDefaults,
         range: Range<usize>,
         defaults: Attrs<'a>,
     ) -> Result<AttrsList, Error> {
@@ -1167,9 +1328,10 @@ impl Attributes {
             // Collect the attributes.
             let current_range = last_index..index;
             if !current_range.is_empty() {
-                let new_attrs = self.collect_attributes(defaults, attr_list.iter().copied())?;
+                let new_attrs =
+                    self.collect_attributes(system, defaults, attr_list.iter().copied())?;
                 trace!("adding span {:?}", current_range);
-                result.add_span(current_range, new_attrs);
+                result.add_span(current_range, new_attrs.as_attrs());
             } else {
                 trace!("skipping empty span {:?}", current_range);
             }
@@ -1195,14 +1357,42 @@ impl Attributes {
         // Emit the final span.
         let current_range = last_index..range.end;
         if !current_range.is_empty() {
-            let new_attrs = self.collect_attributes(defaults, attr_list.into_iter())?;
+            let new_attrs = self.collect_attributes(system, defaults, attr_list.into_iter())?;
             trace!("adding final span {:?}", current_range);
-            result.add_span(current_range, new_attrs);
+            result.add_span(current_range, new_attrs.as_attrs());
         } else {
             trace!("skipping empty final span {:?}", current_range);
         }
 
         Ok(result)
+    }
+}
+
+/// Line metrics associated with a layout run.
+struct RunMetrics {
+    /// The `piet` line metrics.
+    line_metric: piet::LineMetric,
+}
+
+impl RunMetrics {
+    fn new(run: ct::LayoutRun<'_>, glyph_size: f64) -> RunMetrics {
+        let (start_offset, end_offset) = run.glyphs.iter().fold((0, 0), |(start, end), glyph| {
+            (cmp::min(start, glyph.start), cmp::max(end, glyph.end))
+        });
+
+        let y_offset = run.line_top.into();
+        let baseline = run.line_y as f64 - run.line_top as f64;
+
+        RunMetrics {
+            line_metric: piet::LineMetric {
+                start_offset,
+                end_offset,
+                trailing_whitespace: 0, // TODO
+                y_offset,
+                height: glyph_size as _,
+                baseline,
+            },
+        }
     }
 }
 
