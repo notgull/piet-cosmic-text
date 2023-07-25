@@ -153,7 +153,7 @@ macro_rules! trace {
 #[cfg(not(feature = "tracing"))]
 macro_rules! trace_span {
     ($($tt:tt)*) => {
-        Span
+        $crate::Span
     };
 }
 
@@ -167,7 +167,7 @@ macro_rules! trace_span {
 #[cfg(not(feature = "tracing"))]
 macro_rules! warn_span {
     ($($tt:tt)*) => {
-        Span
+        $crate::Span
     };
 }
 
