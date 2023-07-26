@@ -30,7 +30,9 @@ use ct::{Attrs, Buffer, BufferLine, Metrics};
 
 use piet::{util, Error, TextAlignment, TextAttribute, TextStorage};
 
+use std::cmp;
 use std::fmt;
+use std::mem;
 use std::ops::{Range, RangeBounds};
 
 use tinyvec::TinyVec;
@@ -355,17 +357,61 @@ fn fill_holes(
 
 /// Find holes where the text is not rendered.
 fn find_holes(line: &BufferLine) -> TinyVec<[Range<usize>; 1]> {
-    line.shape_opt()
-        .iter()
-        .flat_map(|line| &line.spans)
-        .flat_map(|span| &span.words)
-        .flat_map(|word| &word.glyphs)
-        .filter_map(|glyph| {
-            if glyph.glyph_id == 0 {
-                Some(glyph.start..glyph.end)
-            } else {
-                None
+    let mut holes = TinyVec::new();
+
+    let shape = match line.shape_opt().as_ref() {
+        Some(shape) => shape,
+        None => return holes,
+    };
+
+    let mut current_range = 0..0;
+    let mut in_hole = false;
+
+    for word in shape.spans.iter().flat_map(|span| &span.words) {
+        // Make sure blank words fall into the same hole.
+        if word.blank {
+            if in_hole {
+                let end = word
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.end)
+                    .chain(Some(current_range.end))
+                    .max()
+                    .unwrap();
+                let start = word
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.start)
+                    .chain(Some(current_range.start))
+                    .min()
+                    .unwrap();
+                current_range = start..end;
             }
-        })
-        .collect()
+            continue;
+        }
+
+        // Find holes in non-blank words.
+        for glyph in &word.glyphs {
+            if glyph.glyph_id == 0 {
+                // Unshaped glyph, this is a hole.
+                if !in_hole {
+                    in_hole = true;
+                    current_range = glyph.start..glyph.end;
+                } else {
+                    // Extend the hole.
+                    current_range.start = cmp::min(current_range.start, glyph.start);
+                    current_range.end = cmp::max(current_range.end, glyph.end);
+                }
+            } else if mem::replace(&mut in_hole, false) {
+                holes.push(current_range);
+                current_range = 0..0;
+            }
+        }
+    }
+
+    if in_hole && !current_range.is_empty() {
+        holes.push(current_range);
+    }
+
+    holes
 }
