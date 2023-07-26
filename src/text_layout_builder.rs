@@ -31,7 +31,9 @@ use ct::{Attrs, Buffer, BufferLine, Metrics};
 use piet::{util, Error, TextAlignment, TextAttribute, TextStorage};
 
 use std::fmt;
-use std::ops::RangeBounds;
+use std::ops::{Range, RangeBounds};
+
+use tinyvec::TinyVec;
 
 /// The text layout builder used by the [`Text`].
 pub struct TextLayoutBuilder {
@@ -136,7 +138,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             string,
             defaults,
             max_width,
-            range_attributes,
+            mut range_attributes,
             error,
             ..
         } = self;
@@ -214,7 +216,7 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             offset = end;
         }
 
-        let buffer = {
+        let mut buffer = {
             let FontSystemAndDefaults { system, .. } = font_system;
             let mut buffer = Buffer::new(system, metrics);
 
@@ -228,8 +230,142 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             buffer
         };
 
+        // Fix any shaping holes.
+        fix_shaping_holes(
+            &mut buffer,
+            &mut range_attributes,
+            default_attrs.as_attrs(),
+            font_system,
+        )?;
+
         drop(font_system_guard);
 
         Ok(TextLayout::new(handle, buffer, string, font_size as i32))
     }
+}
+
+/// Attempt to fill the holes in a buffer.
+fn fix_shaping_holes(
+    buffer: &mut Buffer,
+    attributes: &mut Attributes,
+    attrs: Attrs<'_>,
+    system: &mut FontSystemAndDefaults,
+) -> Result<(), Error> {
+    // First, try clearing the font.
+    if fill_holes(buffer, system, attrs, attributes, FillType::ClearFont)? {
+        buffer.shape_until_scroll(&mut system.system);
+    } else {
+        return Ok(());
+    }
+
+    // Then, try clearing the style.
+    if fill_holes(buffer, system, attrs, attributes, FillType::ClearStyle)? {
+        buffer.shape_until_scroll(&mut system.system);
+    } else {
+        return Ok(());
+    }
+
+    // If we still have holes, give up.
+    #[cfg(feature = "tracing")]
+    {
+        if !find_holes(&buffer.lines[0]).is_empty() {
+            trace!("Failed to fill holes in text");
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum FillType {
+    ClearStyle,
+    ClearFont,
+}
+
+/// Fill the holes of the text.
+fn fill_holes(
+    buffer: &mut Buffer,
+    system: &mut FontSystemAndDefaults,
+    defaults: Attrs<'_>,
+    attributes: &mut Attributes,
+    ty: FillType,
+) -> Result<bool, Error> {
+    let mut found_holes = false;
+    let mut offset = 0;
+
+    for line in &mut buffer.lines {
+        let holes = find_holes(line);
+
+        if holes.is_empty() {
+            continue;
+        }
+
+        found_holes = true;
+
+        // Try to fill the holes.
+        let original = line.attrs_list();
+        for range in holes {
+            // Figure out the replacement attribute.
+            match ty {
+                FillType::ClearFont => {
+                    // Figure out the font type to use.
+                    let family = match original.get_span(range.start).family {
+                        ct::Family::Cursive => piet::FontFamily::SERIF,
+                        ct::Family::Monospace => piet::FontFamily::MONOSPACE,
+                        ct::Family::SansSerif => piet::FontFamily::SANS_SERIF,
+                        ct::Family::Serif => piet::FontFamily::SERIF,
+                        ct::Family::Fantasy => piet::FontFamily::SANS_SERIF,
+                        ct::Family::Name(name) => {
+                            // Figure out the best kind of font to use.
+                            let mut family = piet::FontFamily::SANS_SERIF;
+                            let name = name.to_ascii_lowercase();
+
+                            if name.contains("serif") {
+                                family = piet::FontFamily::SERIF;
+                            } else if name.contains("mono") {
+                                family = piet::FontFamily::MONOSPACE;
+                            } // Sans-Serif case is implicitly handled.
+
+                            family
+                        }
+                    };
+
+                    attributes.push(range, TextAttribute::FontFamily(family));
+                }
+
+                FillType::ClearStyle => {
+                    attributes.push(
+                        range.clone(),
+                        TextAttribute::Style(piet::FontStyle::Regular),
+                    );
+                    attributes.push(range, TextAttribute::Weight(piet::FontWeight::NORMAL));
+                }
+            };
+        }
+
+        // Set the new attributes.
+        let end = offset + line.text().len() + 1;
+        let attrs_list = attributes.text_attributes(system, offset..end, defaults)?;
+        line.set_attrs_list(attrs_list);
+        offset = end;
+    }
+
+    Ok(found_holes)
+}
+
+/// Find holes where the text is not rendered.
+fn find_holes(line: &BufferLine) -> TinyVec<[Range<usize>; 1]> {
+    line.shape_opt()
+        .iter()
+        .flat_map(|line| &line.spans)
+        .flat_map(|span| &span.words)
+        .flat_map(|word| &word.glyphs)
+        .filter_map(|glyph| {
+            if glyph.glyph_id == 0 {
+                Some(glyph.start..glyph.end)
+            } else {
+                None
+            }
+        })
+        .collect()
 }
