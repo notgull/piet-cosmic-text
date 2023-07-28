@@ -240,9 +240,13 @@ impl piet::TextLayoutBuilder for TextLayoutBuilder {
             font_system,
         )?;
 
-        drop(font_system_guard);
-
-        Ok(TextLayout::new(handle, buffer, string, font_size as i32))
+        Ok(TextLayout::new(
+            handle.clone(),
+            buffer,
+            string,
+            font_size as i32,
+            &mut font_system.system,
+        ))
     }
 }
 

@@ -24,10 +24,17 @@ use crate::text::Text;
 use cosmic_text as ct;
 use ct::{Buffer, LayoutRunIter};
 
-use piet::kurbo::{Point, Rect, Size};
+use piet::kurbo::{Point, Rect, Size, Vec2};
 use piet::TextStorage;
 
+use swash::scale::image::Image as SwashImage;
+use swash::scale::outline::Outline as SwashOutline;
+use swash::scale::{ScaleContext, StrikeWith};
+use swash::zeno;
+
+use std::cell::Cell;
 use std::cmp;
+use std::collections::hash_map::{Entry, HashMap};
 use std::fmt;
 use std::rc::Rc;
 
@@ -59,6 +66,12 @@ struct BufferWrapper {
 
     /// Run metrics.
     run_metrics: Vec<piet::LineMetric>,
+
+    /// Ink rectangle for the buffer.
+    ink_rectangle: Rect,
+
+    /// Logical extent for the buffer.
+    logical_size: Cell<Option<Size>>,
 
     /// The text handle.
     handle: Text,
@@ -92,13 +105,55 @@ impl TextLayout {
         buffer: Buffer,
         string: Box<dyn TextStorage>,
         glyph_size: i32,
+        font_system: &mut ct::FontSystem,
     ) -> Self {
+        let span = trace_span!("TextLayout::new", string = %string.as_str());
+        let _guard = span.enter();
+
         // Figure out the metrics.
         let run_metrics = buffer
             .layout_runs()
             .map(|run| RunMetrics::new(run, glyph_size as f64))
             .map(|RunMetrics { line_metric }| line_metric)
             .collect();
+
+        // Scale up the buffers to get a good idea of the ink rectangle.
+        let mut ink_context = text.borrow_ink();
+        let mut missing_bbox_count = 0;
+
+        let bounding_boxes = buffer
+            .layout_runs()
+            .flat_map(|run| {
+                let run_y = run.line_y;
+                run.glyphs.iter().map(move |glyph| (glyph, run_y))
+            })
+            .filter_map(|(glyph, run_y)| {
+                let physical = glyph.physical((0., 0.), 1.);
+                let offset = Vec2::new(
+                    physical.x as f64 + physical.cache_key.x_bin.as_float() as f64,
+                    run_y as f64 + physical.y as f64 + physical.cache_key.y_bin.as_float() as f64,
+                );
+
+                // Figure out the bounding box.
+                match ink_context.bounding_box(&physical, font_system) {
+                    Some(mut rect) => {
+                        rect = rect + offset;
+                        Some(rect)
+                    }
+
+                    None => {
+                        missing_bbox_count += 1;
+                        None
+                    }
+                }
+            });
+        let ink_rectangle = bounding_rectangle(bounding_boxes);
+
+        if missing_bbox_count > 0 {
+            warn!("Missing {} bounding boxes", missing_bbox_count);
+        }
+
+        drop(ink_context);
 
         Self {
             text_buffer: Rc::new(BufferWrapper {
@@ -107,6 +162,8 @@ impl TextLayout {
                 buffer: Some(buffer),
                 run_metrics,
                 handle: text,
+                ink_rectangle,
+                logical_size: Cell::new(None),
             }),
         }
     }
@@ -124,27 +181,29 @@ impl TextLayout {
 
 impl piet::TextLayout for TextLayout {
     fn size(&self) -> Size {
-        self.layout_runs()
-            .fold(Size::new(0.0, 0.0), |mut size, run| {
-                let max_glyph_size = run
-                    .glyphs
-                    .iter()
-                    .map(|glyph| glyph.font_size as i32)
-                    .max()
-                    .unwrap_or(self.text_buffer.glyph_size);
+        if let Some(size) = self.text_buffer.logical_size.get() {
+            return size;
+        }
 
-                let new_width = run.line_w as f64;
-                if new_width > size.width {
-                    size.width = new_width;
+        let mut size = Size::new(f64::MIN, f64::MIN);
+
+        for run in self.layout_runs() {
+            let max = |a: f32, b: f64| {
+                let a: f64 = a.into();
+                if a < b {
+                    b
+                } else {
+                    a
                 }
+            };
 
-                let new_height = (run.line_y as i32 + max_glyph_size) as f64;
-                if new_height > size.height {
-                    size.height = new_height;
-                }
+            size.width = max(run.line_w, size.width);
+            size.height = max(run.line_y, size.height);
+        }
 
-                size
-            })
+        self.text_buffer.logical_size.set(Some(size));
+
+        size
     }
 
     fn trailing_whitespace_width(&self) -> f64 {
@@ -153,8 +212,7 @@ impl piet::TextLayout for TextLayout {
     }
 
     fn image_bounds(&self) -> Rect {
-        // TODO: Make this more exact.
-        Rect::from_origin_size(Point::ZERO, self.size())
+        self.text_buffer.ink_rectangle
     }
 
     fn text(&self) -> &str {
@@ -162,16 +220,10 @@ impl piet::TextLayout for TextLayout {
     }
 
     fn line_text(&self, line_number: usize) -> Option<&str> {
-        let run = self.buffer().layout_runs().nth(line_number)?;
-
-        if run.glyphs.is_empty() {
-            return None;
-        }
-
-        let start = run.glyphs[0].start;
-        let end = run.glyphs.last().unwrap().end;
-
-        Some(&self.text_buffer.string[start..end])
+        self.buffer()
+            .layout_runs()
+            .nth(line_number)
+            .map(|run| run.text)
     }
 
     fn line_metric(&self, line_number: usize) -> Option<piet::LineMetric> {
@@ -192,7 +244,53 @@ impl piet::TextLayout for TextLayout {
             return htp;
         }
 
-        // TODO
+        let mut ink_context = self.text_buffer.handle.borrow_ink();
+        let mut font_system_guard = match self.text_buffer.handle.borrow_font_system() {
+            Some(system) => system,
+            None => {
+                warn!("Tried to borrow font system to calculate better hit test point, but it was already borrowed.");
+                htp.idx = 0;
+                htp.is_inside = false;
+                return htp;
+            }
+        };
+        let font_system = &mut font_system_guard
+            .get()
+            .expect("For a TextLayout to exist, the font system must have already been initialized")
+            .system;
+
+        // Look for the glyph with the closest distance to the point.
+        let mut closest_distance = f64::MAX;
+
+        for (glyph, physical_glyph) in self.layout_runs().flat_map(|run| {
+            let run_y = run.line_y;
+            run.glyphs
+                .iter()
+                .map(move |glyph| (glyph, glyph.physical((0., run_y), 1.)))
+        }) {
+            let bounding_box = match ink_context.bounding_box(&physical_glyph, font_system) {
+                Some(bbox) => bbox,
+                None => continue,
+            };
+
+            // If the point is inside of the bounding box, this is definitely it.
+            if bounding_box.contains(point) {
+                htp.idx = glyph.start;
+                htp.is_inside = false;
+                return htp;
+            }
+
+            // Otherwise, find the distance from the midpoint.
+            let midpoint = bounding_box.center();
+            let distance = midpoint.distance(point);
+            if distance < closest_distance {
+                closest_distance = distance;
+                htp.idx = glyph.start;
+            }
+        }
+
+        // If we didn't find anything, just return the closest index.
+        htp.is_inside = false;
         htp
     }
 
@@ -219,7 +317,10 @@ impl piet::TextLayout for TextLayout {
 
         let (line, point, _) = match lines_and_glyphs.find(|(_, _, range)| range.contains(&idx)) {
             Some(x) => x,
-            None => return piet::HitTestPosition::default(),
+            None => {
+                // TODO: What are you supposed to do here?
+                return piet::HitTestPosition::default();
+            }
         };
 
         let mut htp = piet::HitTestPosition::default();
@@ -227,6 +328,31 @@ impl piet::TextLayout for TextLayout {
         htp.line = line;
         htp
     }
+}
+
+fn bounding_rectangle(rects: impl IntoIterator<Item = Rect>) -> Rect {
+    let mut iter = rects.into_iter();
+    let mut sum_rect = match iter.next() {
+        Some(rect) => rect,
+        None => return Rect::ZERO,
+    };
+
+    for rect in iter {
+        if rect.x0 < sum_rect.x0 {
+            sum_rect.x0 = rect.x0;
+        }
+        if rect.y0 < sum_rect.y0 {
+            sum_rect.y0 = rect.y0;
+        }
+        if rect.x1 > sum_rect.x1 {
+            sum_rect.x1 = rect.x1;
+        }
+        if rect.y1 > sum_rect.y1 {
+            sum_rect.y1 = rect.y1;
+        }
+    }
+
+    sum_rect
 }
 
 /// Line metrics associated with a layout run.
@@ -255,4 +381,93 @@ impl RunMetrics {
             },
         }
     }
+}
+
+/// State for calculating the ink rectangle.
+pub(crate) struct InkRectangleState {
+    /// The swash scaling context.
+    scaler: ScaleContext,
+
+    /// Cache between fonts, glyphs and their bounding boxes.
+    bbox_cache: HashMap<ct::CacheKey, Option<Rect>>,
+
+    /// Swash image buffer.
+    swash_image: SwashImage,
+
+    /// Swash outline buffer.
+    swash_outline: SwashOutline,
+}
+
+impl InkRectangleState {
+    pub(crate) fn new() -> Self {
+        Self {
+            scaler: ScaleContext::new(),
+            bbox_cache: HashMap::new(),
+            swash_image: SwashImage::new(),
+            swash_outline: SwashOutline::new(),
+        }
+    }
+
+    /// Get the bounding box for a glyph.
+    fn bounding_box(
+        &mut self,
+        glyph: &ct::PhysicalGlyph,
+        system: &mut ct::FontSystem,
+    ) -> Option<Rect> {
+        // If we already have the bounding box here, return it.
+        let entry = match self.bbox_cache.entry(glyph.cache_key) {
+            Entry::Occupied(o) => return *o.into_mut(),
+            Entry::Vacant(v) => v,
+        };
+
+        let mut bbox = None;
+
+        // Find the font.
+        if let Some(font) = system.get_font(glyph.cache_key.font_id) {
+            // Create a scaler for this font.
+            let mut scaler = self
+                .scaler
+                .builder(font.as_swash())
+                .size(f32::from_bits(glyph.cache_key.font_size_bits))
+                .build();
+
+            // See if we can get an outline.
+            self.swash_outline.clear();
+            if scaler.scale_outline_into(glyph.cache_key.glyph_id, &mut self.swash_outline) {
+                bbox = Some(cvt_bounds(self.swash_outline.bounds()));
+            } else {
+                // See if we can get a bitmap.
+                self.swash_image.clear();
+                if scaler.scale_bitmap_into(
+                    glyph.cache_key.glyph_id,
+                    StrikeWith::BestFit,
+                    &mut self.swash_image,
+                ) {
+                    bbox = Some(cvt_placement(self.swash_image.placement));
+                }
+            }
+        }
+
+        // Cache the result.
+        *entry.insert(bbox)
+    }
+}
+
+fn cvt_placement(placement: zeno::Placement) -> Rect {
+    Rect::new(
+        placement.left.into(),
+        -placement.top as f64,
+        placement.left as f64 + placement.width as f64,
+        -placement.top as f64 + placement.height as f64,
+    )
+}
+
+fn cvt_bounds(mut bounds: zeno::Bounds) -> Rect {
+    bounds.min.y *= -1.0;
+    bounds.max.y *= -1.0;
+    Rect::from_points(cvt_point(bounds.min), cvt_point(bounds.max))
+}
+
+fn cvt_point(point: zeno::Point) -> Point {
+    Point::new(point.x.into(), point.y.into())
 }

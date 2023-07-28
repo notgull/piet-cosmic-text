@@ -157,15 +157,14 @@ impl Attributes {
         }
 
         for index in indices {
-            let piet_attr = self
-                .attributes
-                .get(index)
-                .ok_or_else(|| Error::BackendError("invalid attribute index".into()))?;
+            let piet_attr = self.attributes.get(index).ok_or_else(|| {
+                Error::BackendError(crate::FontError::InvalidAttributeIndex.into())
+            })?;
             match piet_attr {
                 TextAttribute::FontFamily(family) => {
                     attrs.family = cvt_family(family);
                 }
-                TextAttribute::FontSize(_) => {
+                TextAttribute::FontSize(_size) => {
                     // TODO: cosmic-text does not support variable sized text yet.
                     // https://github.com/pop-os/cosmic-text/issues/64
                     error!("piet-cosmic-text does not support variable size fonts yet");
@@ -207,8 +206,12 @@ impl Attributes {
         let _guard = span.enter();
 
         let mut last_index = 0;
-        let mut attr_list = vec![];
         let mut result = AttrsList::new(defaults);
+
+        // It may seem like we could use a HashSet here for efficiency, but the order in which the
+        // attributes are applied actually matters here. In the future we should investigate more
+        // efficient structures for this.
+        let mut attr_list = vec![];
 
         // Get the ranges within the range.
         let mut ranges = self

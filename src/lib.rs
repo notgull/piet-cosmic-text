@@ -205,6 +205,9 @@ pub(crate) enum FontError {
 
     /// The font system is not loaded yet.
     NotLoaded,
+
+    /// Attribute index mismatch.
+    InvalidAttributeIndex,
 }
 
 impl fmt::Display for FontError {
@@ -212,6 +215,7 @@ impl fmt::Display for FontError {
         match self {
             Self::AlreadyBorrowed => f.write_str("the FontSystem is already mutably borrowed and cannot be accessed"),
             Self::NotLoaded => f.write_str("the FontSystem is not loaded yet, check is_loaded() before accessing or use wait_for_load()"),
+            Self::InvalidAttributeIndex => f.write_str("invalid attribute index"),
         }
     }
 }

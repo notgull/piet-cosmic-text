@@ -22,7 +22,7 @@
 //! The `Text` API, the root of the system.
 
 use crate::export_work::ExportWork;
-use crate::text_layout::TextLayout;
+use crate::text_layout::{InkRectangleState, TextLayout};
 use crate::text_layout_builder::TextLayoutBuilder;
 use crate::{channel, FontError, STANDARD_DPI};
 
@@ -96,6 +96,9 @@ struct Inner {
 
     /// The current dots-per-inch (DPI) of the rendering surface.
     dpi: Cell<f64>,
+
+    /// Cache the ink rectangle calculation state.
+    ink: RefCell<InkRectangleState>,
 }
 
 impl Inner {
@@ -110,6 +113,9 @@ impl Inner {
     }
 }
 
+/// A guard for accessing the font system.
+///
+/// This is essentially a thread-unsafe mutex that uses `EventListener` for notifications.
 pub(crate) struct FontSystemGuard<'a> {
     /// The font system.
     font_db: RefMut<'a, DelayedFontSystem>,
@@ -134,7 +140,7 @@ impl DerefMut for FontSystemGuard<'_> {
 
 impl Drop for FontSystemGuard<'_> {
     fn drop(&mut self) {
-        self.font_db_free.notify(usize::MAX);
+        self.font_db_free.notify(1);
     }
 }
 
@@ -250,6 +256,11 @@ impl Text {
         self.0.borrow_font_system()
     }
 
+    /// Borrow the ink rectangle state.
+    pub(crate) fn borrow_ink(&self) -> RefMut<'_, InkRectangleState> {
+        self.0.ink.borrow_mut()
+    }
+
     /// Take the inner `BufferLine` buffer.
     pub(crate) fn take_buffer(&self) -> Vec<BufferLine> {
         self.0.buffer.replace(Vec::new())
@@ -288,7 +299,7 @@ impl Text {
                 match embedded_fonts::load_embedded_font_data(&mut fs) {
                     Ok(mut ids) => defaults.append(&mut ids),
                     Err(_err) => {
-                        error!("failed to load embedded font data: {}", _err)
+                        error!("failed to load embedded font data: {}", _err);
                     }
                 }
             }
@@ -300,14 +311,14 @@ impl Text {
                         families: &[family],
                         ..Default::default()
                     }) {
-                        defaults.push(font);
+                        defaults.insert(0, font);
                     } else {
                         warn!("failed to find default font for family {:?}", family);
                     }
                 };
 
-                add_defaults(Family::Serif);
                 add_defaults(Family::SansSerif);
+                add_defaults(Family::Serif);
                 add_defaults(Family::Monospace);
             }
 
@@ -317,15 +328,10 @@ impl Text {
             });
         });
 
-        Self(Rc::new(Inner {
-            font_db: RefCell::new(DelayedFontSystem::Waiting(recv)),
-            font_db_free: Event::new(),
-            buffer: Cell::new(Vec::new()),
-            dpi: Cell::new(STANDARD_DPI),
-        }))
+        Self::with_delayed_font_system(DelayedFontSystem::Waiting(recv))
     }
 
-    /// Create a new `Text` renderer from a `FontSystem`.
+    /// Create a new `Text` renderer from an existing `FontSystem`.
     pub fn from_font_system(font_system: FontSystem) -> Self {
         let defaults = {
             let load_default_family = |family: Family<'_>| {
@@ -342,14 +348,19 @@ impl Text {
             defaults
         };
 
+        Self::with_delayed_font_system(DelayedFontSystem::Real(FontSystemAndDefaults {
+            system: font_system,
+            default_fonts: defaults,
+        }))
+    }
+
+    fn with_delayed_font_system(font_db: DelayedFontSystem) -> Self {
         Self(Rc::new(Inner {
-            font_db: RefCell::new(DelayedFontSystem::Real(FontSystemAndDefaults {
-                system: font_system,
-                default_fonts: defaults,
-            })),
+            font_db: RefCell::new(font_db),
             font_db_free: Event::new(),
             buffer: Cell::new(Vec::new()),
             dpi: Cell::new(STANDARD_DPI),
+            ink: RefCell::new(InkRectangleState::new()),
         }))
     }
 
@@ -418,7 +429,8 @@ impl Text {
     ///
     /// # Notes
     ///
-    /// Loading new fonts while this function is in use will result in an error.
+    /// Loading new fonts or calculating the text bounding box while this function is in use will
+    /// result in an error.
     pub fn with_font_system_mut<R>(&self, f: impl FnOnce(&mut FontSystem) -> R) -> Option<R> {
         let mut font_db = self.0.borrow_font_system()?;
         font_db.get().map(|fs| f(&mut fs.system))
@@ -488,7 +500,10 @@ impl piet::Text for Text {
 
             // For simplicity, just take the first ID if this is a font collection.
             match ids.len() {
-                0 => return Err(Error::FontLoadingFailed),
+                0 => {
+                    error!("font collection contained no fonts");
+                    return Err(Error::FontLoadingFailed);
+                }
                 1 => ids[0],
                 _len => {
                     warn!("received font collection of length {_len}, only selecting first font");

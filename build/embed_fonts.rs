@@ -31,9 +31,6 @@ macro_rules! leap {
     ($e:expr, $msg:literal) => {{
         ($e).ok_or_else::<Box<dyn Error>, _>(|| ($msg).into())?
     }};
-    ($e:expr) => {{
-        ($e).map_err::<Box<dyn Error>, _>(Into::into)?
-    }};
 }
 
 /// Fonts to embed.

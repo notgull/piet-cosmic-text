@@ -24,10 +24,12 @@
 //! These fonts act as a backup for when the system fonts are not available. This tends to happen
 //! especially on web targets.
 
-use cosmic_text::fontdb::ID as FontId;
+use cosmic_text::fontdb::{Source, ID as FontId};
 use cosmic_text::FontSystem;
-use std::io::{prelude::*, Error};
+
+use std::io::Error;
 use std::mem;
+use std::sync::Arc;
 
 // The raw data emitted by build/embed_fonts.rs.
 const FONT_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/font_data/font_data.bin"));
@@ -43,6 +45,8 @@ pub(super) fn load_embedded_font_data(system: &mut FontSystem) -> Result<Vec<Fon
 
     #[cfg(feature = "compress_fonts")]
     {
+        use std::io::prelude::*;
+
         // Use `yazi` to decompress the font data.
         let mut decoder = {
             let mut decoder = yazi::Decoder::boxed();
@@ -61,41 +65,32 @@ pub(super) fn load_embedded_font_data(system: &mut FontSystem) -> Result<Vec<Fon
             )
         })?;
 
-        return read_font_data(system, &mut &*decoded_data);
+        return read_font_data(system, &decoded_data);
     }
 }
 
 /// Read from font data into the font system.
-fn read_font_data(system: &mut FontSystem, mut reader: impl Read) -> Result<Vec<FontId>, Error> {
-    let mut buf = vec![0; 8];
-    let mut cursor;
+fn read_font_data(system: &mut FontSystem, mut data: &[u8]) -> Result<Vec<FontId>, Error> {
     let mut all_ids = vec![];
 
     loop {
-        // Read the eight bytes representing the length of the font name.
-        buf.resize(8, 0);
-        cursor = 0;
-        match reader.read(&mut buf[cursor..])? {
-            0 => break,
-            n => {
-                cursor += n;
-                if cursor < 8 {
-                    continue;
-                }
-            }
-        }
+        // Get the length of the font.
+        let font_len = if data.len() >= mem::size_of::<u64>() {
+            let (length, rest) = data.split_at(mem::size_of::<u64>());
+            data = rest;
+            u64::from_le_bytes(length.try_into().unwrap())
+        } else {
+            break;
+        };
 
-        // Read the entire font file.
-        let length = u64::from_le_bytes(buf[..8].try_into().unwrap());
-        buf.clear();
-        reader.by_ref().take(length).read_to_end(&mut buf)?;
+        // Read the font data.
+        let (font_data, rest) = data.split_at(font_len.try_into().unwrap());
+        data = rest;
 
         // Insert it into the font system.
         let ids = system
             .db_mut()
-            .load_font_source(cosmic_text::fontdb::Source::Binary(std::sync::Arc::new(
-                mem::take(&mut buf),
-            )));
+            .load_font_source(Source::Binary(Arc::new(font_data.to_vec())));
         assert!(!ids.is_empty());
 
         for id in ids {

@@ -6,7 +6,7 @@ The following fonts are embedded into `piet-cosmic-text` as a fallback for when 
 - DejaVu Serif
 - DejaVu Sans Mono
 
-In this directory, you can find the distributed version of these fonts. Aside from removing some `fontconfig` files, this is the same as the distribution from the DejaVu team, licensing at all.
+In this directory, you can find the distributed version of these fonts. Aside from removing some `fontconfig` files, this is the same as the distribution from the DejaVu team, licensing and all.
 
 The original `README.md` file is preserved below.
 
