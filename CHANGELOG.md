@@ -2,6 +2,13 @@
 
 This changelog describes changes that have occurred in `piet-cosmic-text` across versions.
 
+## Version 0.3.1
+
+- Embed fonts directly into the executable.
+- Calculate text bounding boxes and line metrics ahead of time.
+- Fix a bug where text would not render if the styling changed mid-line.
+- Removing licensing under the Patron License and the CLA.
+
 ## Version 0.3.0
 
 - **Breaking:** Bump to `cosmic-text` v0.9.0
