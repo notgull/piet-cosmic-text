@@ -2,6 +2,8 @@
 
 Implements [`piet`]'s [`Text`] interface using the [`cosmic-text`] crate.
 
+This repository is hosted on [SourceHut](https://git.sr.ht/~notgull/piet-cosmic-text). The GitHub mirror is kept for convenience.
+
 [`piet`]: https://crates.io/crates/piet
 [`Text`]: https://docs.rs/piet/latest/piet/trait.Text.html
 [`cosmic-text`]: https://crates.io/crates/cosmic-text

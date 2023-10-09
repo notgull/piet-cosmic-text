@@ -22,10 +22,10 @@ version = "0.3.2"
 edition = "2021"
 authors = ["John Nunley <jtnunley01@gmail.com>"]
 description = "A text layout engine for piet based on cosmic-text"
-repository = "https://github.com/notgull/piet-cosmic-text"
+repository = "https://git.sr.ht/~notgull/piet-cosmic-text"
 license = "LGPL-3.0-or-later OR MPL-2.0"
 documentation = "https://docs.rs/piet-cosmic-text"
-homepage = "https://github.com/notgull/piet-cosmic-text#readme"
+homepage = "https://git.sr.ht/~notgull/piet-cosmic-text"
 
 [dependencies]
 cosmic-text = { version = "0.9.0", default-features = false, features = ["swash"] }
