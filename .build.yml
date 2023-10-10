@@ -10,10 +10,10 @@ tasks:
 - install_rust:
     curl https://sh.rustup.rs -sSf | sh -s -- -y
 - test: |
-    cd line-straddler
+    cd piet-cosmic-text
     sh ci/ci.sh 
 - mirror: |
-    cd line-straddler
+    cd piet-cosmic-text
     ssh-keyscan -H -t rsa github.com  >> ~/.ssh/known_hosts
     git remote add github_origin git@github.com:notgull/piet-cosmic-text.git
     git push github_origin main
