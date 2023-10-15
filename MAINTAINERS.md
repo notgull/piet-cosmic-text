@@ -4,7 +4,7 @@ The intellectual property rights for `piet-cosmic-text` are owned by Project Lea
 
 ## Benevolent Dictator for Life
 
-- [John Nunley](https://github.com/notgull) is the Benevolent Dictator for Life (BDFL) of this project. He has the final say in project direction and disputes.
+- [John Nunley](https://sr.ht/~notgull) is the Benevolent Dictator for Life (BDFL) of this project. He has the final say in project direction and disputes.
 
 ## Other Information
 

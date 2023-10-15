@@ -2,7 +2,7 @@
 
 set -eu
 
-# Run CI-based tests for Piet-Tiny-Skia
+# Run CI-based tests for Piet-Cosmic-Text
 
 rx() {
   cmd="$1"
