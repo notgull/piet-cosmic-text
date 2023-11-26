@@ -1,6 +1,7 @@
 # Changelog
 
-This changelog describes changes that have occurred in `piet-cosmic-text` across versions.
+This changelog describes changes that have occurred in `piet-cosmic-text` across
+versions.
 
 ## Version 0.3.2
 
