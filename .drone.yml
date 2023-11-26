@@ -21,6 +21,7 @@ steps:
     image: notgull/ci:latest
     pull: always
     commands:
+      - ensure_tool.sh x11
       - test_rust.sh stable embed_fonts rayon
 ---
 kind: pipeline
@@ -35,6 +36,7 @@ steps:
     image: notgull/ci:latest
     pull: always
     commands:
+      - ensure_tool.sh x11
       - test_rust.sh beta embed_fonts rayon
 ---
 kind: pipeline
@@ -49,6 +51,7 @@ steps:
     image: notgull/ci:latest
     pull: always
     commands:
+      - ensure_tool.sh x11
       - test_rust.sh nightly embed_fonts rayon
 ---
 kind: pipeline
@@ -63,6 +66,7 @@ steps:
     image: notgull/ci:latest
     pull: always
     commands:
+      - ensure_tool.sh x11
       - test_rust.sh 1.63.0 embed_fonts rayon
 ---
 kind: pipeline
