@@ -4,7 +4,8 @@ This changelog describes changes that have occurred in `piet-cosmic-text` across
 
 ## Version 0.3.2
 
-- License has been changed to LGPL v3 or MPL. The Patron License and the CLA have been removed.
+- License has been changed to LGPL v3 or MPL. The Patron License and the CLA
+  have been removed.
 
 ## Version 0.3.1
 
