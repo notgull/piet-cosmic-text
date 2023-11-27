@@ -3,6 +3,10 @@
 This changelog describes changes that have occurred in `piet-cosmic-text` across
 versions.
 
+## Version 0.3.3
+
+- Repository has been moved to `src.notgull.net`.
+
 ## Version 0.3.2
 
 - License has been changed to LGPL v3 or MPL. The Patron License and the CLA
