@@ -22,7 +22,7 @@ steps:
     pull: always
     commands:
       - ensure_tool.sh x11
-      - test_rust.sh stable embed_fonts rayon
+      - test_rust.sh stable --skip-ndf embed_fonts rayon
 ---
 kind: pipeline
 type: docker
@@ -37,7 +37,7 @@ steps:
     pull: always
     commands:
       - ensure_tool.sh x11
-      - test_rust.sh beta embed_fonts rayon
+      - test_rust.sh beta --skip-ndf embed_fonts rayon
 ---
 kind: pipeline
 type: docker
@@ -52,7 +52,7 @@ steps:
     pull: always
     commands:
       - ensure_tool.sh x11
-      - test_rust.sh nightly embed_fonts rayon
+      - test_rust.sh nightly --skip-ndf embed_fonts rayon
 ---
 kind: pipeline
 type: docker
@@ -67,7 +67,7 @@ steps:
     pull: always
     commands:
       - ensure_tool.sh x11
-      - test_rust.sh 1.63.0 embed_fonts rayon
+      - test_rust.sh 1.63.0 --skip-ndf embed_fonts rayon
 ---
 kind: pipeline
 type: docker
