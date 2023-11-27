@@ -67,7 +67,7 @@ steps:
     pull: always
     commands:
       - ensure_tool.sh x11
-      - test_rust.sh 1.63.0 --skip-ndf embed_fonts
+      - test_rust.sh 1.65.0 --skip-ndf embed_fonts
 ---
 kind: pipeline
 type: docker

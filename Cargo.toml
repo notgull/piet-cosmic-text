@@ -26,6 +26,7 @@ repository = "https://src.notgull.net/notgull/piet-cosmic-text"
 license = "LGPL-3.0-or-later OR MPL-2.0"
 documentation = "https://docs.rs/piet-cosmic-text"
 homepage = "https://src.notgull.net/notgull/piet-cosmic-text"
+rust-version = "1.65.0"
 
 [dependencies]
 cosmic-text = { version = "0.9.0", default-features = false, features = ["swash"] }
