@@ -11,7 +11,7 @@ steps:
     commands:
      - rustup default ${RUST_VERSION}
      - cargo build
-     - cargo build --no-default-features --features libm 
+     - cargo build --no-default-features 
     environment:
       CARGO_INCREMENTAL: "0"
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
