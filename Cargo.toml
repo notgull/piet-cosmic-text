@@ -18,7 +18,7 @@
 
 [package]
 name = "piet-cosmic-text"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
 authors = ["John Nunley <dev@notgull.net>"]
 description = "A text layout engine for piet based on cosmic-text"

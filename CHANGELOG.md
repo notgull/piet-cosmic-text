@@ -3,6 +3,10 @@
 This changelog describes changes that have occurred in `piet-cosmic-text` across
 versions.
 
+## Version 0.3.4
+
+- Repository has been moved to `codeberg.org`.
+
 ## Version 0.3.3
 
 - Repository has been moved to `src.notgull.net`.
