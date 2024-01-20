@@ -4,10 +4,10 @@ Implements [`piet`]'s [`Text`] interface using the [`cosmic-text`] crate.
 
 ## Source Code
 
-The canonical code for this repository is kept on our [Git Forge]. For
+The canonical code for this repository is kept on our [Codeberg]. For
 convenience, a mirror is kept on [GitHub].
 
-[Git Forge]: https://src.notgull.net/notgull/piet-cosmic-text
+[Codeberg]: https://codeberg.org/notgull/piet-cosmic-text
 [GitHub]: https://github.com/notgull/piet-cosmic-text
 [`piet`]: https://crates.io/crates/piet
 [`Text`]: https://docs.rs/piet/latest/piet/trait.Text.html
